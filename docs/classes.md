@@ -2,29 +2,52 @@
 
 ### Game:
 
-	teams – Tuple of 2 Team instances, away team first and home team second: (Team, Team)
-	away_score – Away team score: int
-	home_score – Home team score: int
+    Attributes:
 
+        away_team: Team
+        home_team: Team
+        away_score: int
+        home_score: int
+        batting_team: Team
+        defending_team: Team
+
+    Methods:
+
+        static game(away_team: Team, home_team: Team) → Game
+        at_bat()
+        
 ### Team:
 
-	players – List of 9 Player instances, in batting order: 9*[Player]
-	name – Name of the time: string
-	pitcher – Current pitcher: Player
-	batting_number – Current batter: int 0-8
+    Attributes:
+
+        players: 9*[Player]
+        – List of 9 Player instances, in batting order:
+        name: string
+        curr_pitcher: Player
+        batting_number – Current batter: int 0-8
+
+    Methods:
+
+        team() → Team
 
 ### Player:
 
 	Attributes:
 	
-		ba – Batting Average, How likely a batter is to hit the ball: 0.1-0.4
-		era – Earned Run Average, How many runs a pitcher gives up per 9 innings: 1-9
-		sba – Stolen Base Attempts, How likely a runner is to attempt a steal per pitch: 0-0.2
-		sbp – Stolen Base Percent, How likely a runner is to successfully steal: 0-0.8
+		ba: 0.1-0.4
+        – Batting Average, How likely a batter is to hit the ball
+		era: int 1-9
+        – Earned Run Average, How many runs a pitcher gives up per 9 innings
+        er: 0.01-0.15
+        – Error Rate, how often a defending player perdorm an error.
+		sba: 0-0.2
+        – Stolen Base Attempts, How likely a runner is to attempt a steal per pitch
+		sbp: 0-0.8
+        – Stolen Base Percent, How likely a runner is to successfully steal
 
 	Methods:
 
-		static create_player() → Player
-		static generate_player() → Player
-		at_bat(Player) → int
-		steal_attempt(Player) → int
+		static player() → Player
+		pitch() → Pitch
+        swing(pitch: Pitch) → double
+		steal_attempt(pitcher: Player) → int
