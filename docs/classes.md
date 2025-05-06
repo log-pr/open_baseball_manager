@@ -34,9 +34,9 @@
 
 	Attributes:
 	
-		ba: 0.1-0.4
+        ba: 0.1-0.4
         – Batting Average, How likely a batter is to hit the ball
-		era: int 1-9
+        era: int 1-9
         – Earned Run Average, How many runs a pitcher gives up per 9 innings
         er: 0.01-0.15
         – Error Rate, how often a defending player perdorm an error.
