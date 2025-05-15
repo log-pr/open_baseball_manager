@@ -36,10 +36,10 @@
 	
 		ba: double
 		– Batting Average, How often a batter actually hits the ball per at bat
-        hit_chance: double (range: 0.1-0.3)
-        – How likely a batter is to hit the ball per ball, given it is thrown in the zone
-        seen_ball_chance: double (0.1-0.7)
-        – How likely a batter is to notice a ptuch is out of the zone and should not be swung at
+		hit_chance: double (range: 0.1-0.3)
+		– How likely a batter is to hit the ball per ball, given it is thrown in the zone
+		see_ball_chance: double (0.1-0.7)
+		– How likely a batter is to notice a ptuch is out of the zone and should not be swung at
 		era: int
 		– Earned Run Average, How many runs a pitcher gives up per 9 innings on average
 		er: 0.01-0.15
@@ -52,10 +52,10 @@
 	Methods:
 
 		static player() → Player
-        –
+		–
 		pitch() → Pitch
-        –
+		–
 		swing(pitch: Pitch) → int
-        – outputted int tells if it was a strike, foul, hit left infield, hit center infield, hit right infield, hit left outfield, hit center outfield, hit right outfield, or home run
+		– outputted int tells if it was a strike, foul, hit left infield, hit center infield, hit right infield, hit left outfield, hit center outfield, hit right outfield, or home run
 		steal_attempt(pitcher: Player) → int
-        – 
+		– 
