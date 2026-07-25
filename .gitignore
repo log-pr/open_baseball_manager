@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Delivery bundle of src/ — redundant with the tracked sources
+files.zip
