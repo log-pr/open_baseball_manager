@@ -55,6 +55,22 @@ class SwingOutcome(Enum):
     CONTACT = auto()
 
 
+class FieldingOutcome(Enum):
+    """What the defense physically did.
+
+    Deliberately not "hit" or "error" -- those are scoring judgments, made
+    by OfficialScorer from one of these plus the base state.
+    """
+
+    CAUGHT = auto()
+    FIELDED_CLEANLY = auto()
+    MISPLAYED = auto()  # got to it and botched it
+    THROUGH_INFIELD = auto()  # grounder got past everyone
+    DROPPED_IN = auto()  # air ball landed safely
+    OVER_THE_FENCE = auto()
+    FOUL = auto()
+
+
 class AtBatResult(Enum):
     """The result of a completed plate appearance."""
 

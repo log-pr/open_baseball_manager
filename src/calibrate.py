@@ -11,8 +11,15 @@ from collections import Counter
 
 sys.path.insert(0, ".")
 
-from baseball import AtBatResult, Game, PitchCall, Team  # noqa: E402
-from baseball.at_bat import AtBat  # noqa: E402
+from baseball import (  # noqa: E402
+    AtBatResult,
+    BattingEngine,
+    Game,
+    PitchingEngine,
+    PlayerGameState,
+    Situation,
+    Team,
+)
 
 # Real MLB reference points, roughly current-era.
 BENCHMARKS = {
@@ -54,10 +61,10 @@ def run(n_games: int = 200, seed: int = 7) -> None:
         total_team_games += 2
         innings += result.innings_played
 
-        for event in result.play_by_play:
-            results[event.result] += 1
+        for play in result.plays:
+            results[play.official_result] += 1
             total_pa += 1
-            total_pitches += event.pitches
+            total_pitches += play.pitches
 
     # Batted ball characteristics measured separately so we can sample a lot
     # of contact cheaply.
@@ -106,7 +113,10 @@ def run(n_games: int = 200, seed: int = 7) -> None:
 def sample_batted_balls(rng: random.Random, n: int = 20000) -> dict:
     """Measure contact quality across many swings on contact."""
     from baseball.batted_ball import BattedBall
-    from baseball.pitch import Pitch
+
+    pitching = PitchingEngine()
+    batting = BattingEngine()
+    situation = Situation()
 
     # Sample across many generated teams, not one, so these numbers reflect
     # the league-wide talent distribution instead of nine specific players.
@@ -121,12 +131,13 @@ def sample_batted_balls(rng: random.Random, n: int = 20000) -> dict:
     while made < n:
         batter = rng.choice(batters)
         pitcher = rng.choice(pitchers)
-        pitch = Pitch.thrown(pitcher, rng)
-        ab = AtBat(batter=batter, pitcher=pitcher, rng=rng)
+        pitch = pitching.throw_pitch(
+            pitcher, PlayerGameState(player=pitcher), batter, situation, rng
+        )
         # Force a contact event so we sample batted balls, not swing decisions.
-        if rng.random() < ab._whiff_probability(pitch):
+        if rng.random() < batting.whiff_probability(batter, pitch):
             continue
-        if rng.random() < ab._foul_probability(pitch):
+        if rng.random() < batting.foul_probability(batter, pitch):
             continue
         bb = BattedBall.from_contact(batter, pitch, rng)
         made += 1

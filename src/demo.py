@@ -17,7 +17,18 @@ Add a seed to reproduce any run exactly:
 import random
 import sys
 
-from baseball import AtBat, BattedBall, Game, HalfInning, Pitch, Player, Position, Team
+from baseball import (
+    AtBat,
+    BattingEngine,
+    Game,
+    HalfInning,
+    PitchingEngine,
+    Player,
+    PlayerGameState,
+    Position,
+    Situation,
+    Team,
+)
 
 
 def header(text):
@@ -57,12 +68,14 @@ def demo_at_bat(rng):
     batter = Player.generate(rng, "Marcus Webb", Position.CF)
 
     for i in range(5):
-        pitcher.rest()
-        at_bat = AtBat(batter=batter, pitcher=pitcher, defense=defense, rng=rng)
-        result = at_bat.simulate()
+        state = PlayerGameState(player=pitcher)
+        at_bat = AtBat(
+            batter=batter, pitcher=pitcher, pitcher_state=state, rng=rng
+        )
+        outcome = at_bat.simulate()
         detail = f"  |  {at_bat.batted_ball}" if at_bat.batted_ball else ""
         print(
-            f"\nPA {i + 1}: {result.name} on {len(at_bat.pitches)} pitches "
+            f"\nPA {i + 1}: {outcome.terminal_call.name} on {outcome.pitches} pitches "
             f"(final count {at_bat.count}){detail}"
         )
         for pitch in at_bat.pitches:
@@ -73,6 +86,8 @@ def demo_contact(rng):
     header("BATTED BALL PHYSICS")
     pitcher = Player.generate(rng, "Pitcher", Position.SP)
     batter = Player.generate(rng, "Slugger", Position.RF)
+    pitching = PitchingEngine()
+    batting = BattingEngine()
     print(f"\n{batter.scouting_report()}\n")
     print(
         f"{'EV (mph)':>9} {'Launch':>8} {'Spray':>8} {'Dist':>7} {'Hang':>6}  "
@@ -80,8 +95,10 @@ def demo_contact(rng):
     )
     print("-" * 72)
     for _ in range(15):
-        pitch = Pitch.thrown(pitcher, rng)
-        bb = BattedBall.from_contact(batter, pitch, rng)
+        pitch = pitching.throw_pitch(
+            pitcher, PlayerGameState(player=pitcher), batter, Situation(), rng
+        )
+        bb = batting.make_contact(batter, pitch, rng)
         print(
             f"{bb.exit_velocity:>9.1f} {bb.launch_angle:>8.1f} {bb.spray_angle:>8.1f} "
             f"{bb.distance:>7.0f} {bb.hang_time:>6.2f}  {bb.batted_ball_type:<12} "
@@ -95,8 +112,8 @@ def demo_inning(rng):
     defense = Team.generate(rng, "Hawks")
     half = HalfInning(offense, defense, rng, inning=1, half="top")
     runs = half.play()
-    for event in half.events:
-        print(event)
+    for play in half.plays:
+        print(play)
     print(f"\n{runs} run(s) scored.")
 
 
@@ -126,7 +143,7 @@ def box_score(result):
         print(
             f"\n  {pitcher.name}: {ps.innings_pitched:.1f} IP, {ps.hits_allowed} H, "
             f"{ps.earned_runs} ER, {ps.walks_allowed} BB, {ps.strikeouts_pitched} K, "
-            f"{pitcher.pitches_thrown} pitches"
+            f"{team.state_for(pitcher).pitches_thrown} pitches"
         )
 
 

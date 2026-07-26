@@ -15,11 +15,11 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from .config import DEFAULT_CONFIG
 from .enums import (
     GRADE_AVG,
     GRADE_MAX,
     GRADE_MIN,
+    AtBatResult,
     PitchType,
     Position,
     grade_to_z,
@@ -230,6 +230,93 @@ class RunningProfile:
         )
 
 
+@dataclass
+class PlayerStats:
+    """Observed results, as opposed to the hidden ratings that drive them.
+
+    This split is the whole point of a manager game: you judge players by
+    what you see, and what you see is a noisy sample of their true talent.
+
+    Written by OfficialScorer, which is the natural producer -- scoring
+    decisions are exactly what stats are made of.
+    """
+
+    at_bats: int = 0
+    hits: int = 0
+    doubles: int = 0
+    triples: int = 0
+    home_runs: int = 0
+    walks: int = 0
+    strikeouts: int = 0
+    hit_by_pitch: int = 0
+    rbi: int = 0
+    runs: int = 0
+    plate_appearances: int = 0
+
+    # Pitching
+    outs_recorded: int = 0
+    earned_runs: int = 0
+    strikeouts_pitched: int = 0
+    walks_allowed: int = 0
+    hits_allowed: int = 0
+
+    # Fielding
+    putouts: int = 0
+    assists: int = 0
+    errors: int = 0
+
+    @property
+    def batting_average(self) -> float:
+        return self.hits / self.at_bats if self.at_bats else 0.0
+
+    @property
+    def on_base_percentage(self) -> float:
+        denom = self.at_bats + self.walks + self.hit_by_pitch
+        if not denom:
+            return 0.0
+        return (self.hits + self.walks + self.hit_by_pitch) / denom
+
+    @property
+    def slugging(self) -> float:
+        if not self.at_bats:
+            return 0.0
+        singles = self.hits - self.doubles - self.triples - self.home_runs
+        total = singles + 2 * self.doubles + 3 * self.triples + 4 * self.home_runs
+        return total / self.at_bats
+
+    @property
+    def ops(self) -> float:
+        return self.on_base_percentage + self.slugging
+
+    @property
+    def innings_pitched(self) -> float:
+        return self.outs_recorded / 3.0
+
+    @property
+    def era(self) -> float:
+        ip = self.innings_pitched
+        return (self.earned_runs * 9.0 / ip) if ip else 0.0
+
+    def record_result(self, result: AtBatResult) -> None:
+        self.plate_appearances += 1
+        if result.is_at_bat:
+            self.at_bats += 1
+        if result.is_hit:
+            self.hits += 1
+        if result is AtBatResult.DOUBLE:
+            self.doubles += 1
+        elif result is AtBatResult.TRIPLE:
+            self.triples += 1
+        elif result is AtBatResult.HOME_RUN:
+            self.home_runs += 1
+        elif result is AtBatResult.WALK:
+            self.walks += 1
+        elif result is AtBatResult.STRIKEOUT:
+            self.strikeouts += 1
+        elif result is AtBatResult.HIT_BY_PITCH:
+            self.hit_by_pitch += 1
+
+
 @dataclass(eq=False)  # identity-based equality so Players work as dict keys
 class Player:
     """A single player: an identity plus four tool profiles."""
@@ -244,37 +331,12 @@ class Player:
     fielding: FieldingProfile = field(default_factory=FieldingProfile)
     running: RunningProfile = field(default_factory=RunningProfile)
 
-    # Mutable in-game state (reset between appearances).
-    pitches_thrown: int = 0
-
     def __str__(self) -> str:
         return f"{self.name} ({self.primary_position})"
 
     @property
     def is_pitcher(self) -> bool:
         return self.primary_position in PITCHING_POSITIONS
-
-    @property
-    def fatigue(self) -> float:
-        """0.0 when fresh, rising once past the stamina limit.
-
-        Capped: a gassed pitcher gets much worse but never becomes
-        physically incapable of throwing a strike.
-
-        Reads the module-level default config rather than an injected one,
-        because a property takes no arguments. Migration step 3 moves this
-        onto PlayerGameState, where config can be injected properly.
-        """
-        if not self.pitching.stamina:
-            return 0.0
-        over = self.pitches_thrown - self.pitching.stamina
-        return max(
-            0.0, min(DEFAULT_CONFIG.fatigue_cap, over / DEFAULT_CONFIG.fatigue_pitches_scale)
-        )
-
-    def rest(self) -> None:
-        """Reset the in-game pitch count."""
-        self.pitches_thrown = 0
 
     def best_pitch(self) -> Optional[PitchArsenalEntry]:
         if not self.pitching.repertoire:

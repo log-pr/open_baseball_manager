@@ -17,21 +17,58 @@ from baseball import (
     AtBat,
     AtBatResult,
     BaseRunners,
+    BaserunningEngine,
     BattedBall,
+    BattingEngine,
+    DEFAULT_PARK,
+    FieldingEngine,
+    FieldingOutcome,
+    FieldingResult,
     Game,
     HalfInning,
-    Pitch,
+    Lineup,
+    OfficialScorer,
     PitchCall,
+    PitchingEngine,
     Player,
+    PlayerGameState,
     PlayerStats,
     Position,
+    Situation,
     Team,
 )
 from baseball.enums import PLATE_HALF_WIDTH_FT, ZONE_BOTTOM_FT, ZONE_TOP_FT
 
+PITCHING = PitchingEngine()
+BATTING = BattingEngine()
+BASERUNNING = BaserunningEngine()
+SCORER = OfficialScorer()
+
 
 def make_rng(seed=1234):
     return random.Random(seed)
+
+
+def throw(pitcher, rng, state=None, situation=None):
+    """One pitch, the way PitchingEngine is meant to be called."""
+    return PITCHING.throw_pitch(
+        pitcher,
+        state or PlayerGameState(player=pitcher),
+        None,
+        situation or Situation(),
+        rng,
+    )
+
+
+def scored_runners(result):
+    return [a.runner for a in result.advancements if a.scored]
+
+
+def hit_advance(runners, bases, batter, rng):
+    """Advance runners on a hit and apply it, the way HalfInning would."""
+    result = BASERUNNING.advance_on_reach(batter, bases, runners, rng)
+    runners.apply(result)
+    return result
 
 
 def average_player(name="Test Player", position=Position.CF):
@@ -51,18 +88,18 @@ class TestPitch(unittest.TestCase):
 
     def test_pitch_has_sane_velocity(self):
         for _ in range(500):
-            pitch = Pitch.thrown(self.pitcher, self.rng)
+            pitch = throw(self.pitcher, self.rng)
             self.assertGreater(pitch.velocity, 60.0)
             self.assertLess(pitch.velocity, 110.0)
 
     def test_pitch_comes_from_repertoire(self):
         types = {e.pitch_type for e in self.pitcher.pitching.repertoire}
         for _ in range(200):
-            self.assertIn(Pitch.thrown(self.pitcher, self.rng).pitch_type, types)
+            self.assertIn(throw(self.pitcher, self.rng).pitch_type, types)
 
     def test_in_zone_matches_geometry(self):
         for _ in range(500):
-            pitch = Pitch.thrown(self.pitcher, self.rng)
+            pitch = throw(self.pitcher, self.rng)
             expected = (
                 abs(pitch.x) <= PLATE_HALF_WIDTH_FT
                 and ZONE_BOTTOM_FT <= pitch.z <= ZONE_TOP_FT
@@ -70,7 +107,7 @@ class TestPitch(unittest.TestCase):
             self.assertEqual(pitch.in_zone, expected)
 
     def test_zone_rate_is_realistic(self):
-        in_zone = sum(Pitch.thrown(self.pitcher, self.rng).in_zone for _ in range(4000))
+        in_zone = sum(throw(self.pitcher, self.rng).in_zone for _ in range(4000))
         rate = in_zone / 4000
         self.assertGreater(rate, 0.40, f"zone rate {rate:.3f} too low")
         self.assertLess(rate, 0.60, f"zone rate {rate:.3f} too high")
@@ -84,10 +121,10 @@ class TestPitch(unittest.TestCase):
 
         rng_a, rng_b = make_rng(9), make_rng(9)
         elite_miss = statistics.mean(
-            Pitch.thrown(elite, rng_a).miss_distance for _ in range(3000)
+            throw(elite, rng_a).miss_distance for _ in range(3000)
         )
         wild_miss = statistics.mean(
-            Pitch.thrown(wild, rng_b).miss_distance for _ in range(3000)
+            throw(wild, rng_b).miss_distance for _ in range(3000)
         )
         self.assertLess(elite_miss, wild_miss)
 
@@ -99,19 +136,32 @@ class TestPitch(unittest.TestCase):
         wild.pitching.control_grade = 20
 
         rng_a, rng_b = make_rng(11), make_rng(11)
-        elite_zone = sum(Pitch.thrown(elite, rng_a).in_zone for _ in range(3000))
-        wild_zone = sum(Pitch.thrown(wild, rng_b).in_zone for _ in range(3000))
+        elite_zone = sum(throw(elite, rng_a).in_zone for _ in range(3000))
+        wild_zone = sum(throw(wild, rng_b).in_zone for _ in range(3000))
         self.assertGreater(elite_zone, wild_zone)
 
     def test_fatigue_saps_velocity(self):
         fresh = Player.generate(make_rng(3), "Arm", Position.SP)
         fresh.pitching.stamina = 90
         rng = make_rng(5)
-        fresh_velo = statistics.mean(Pitch.thrown(fresh, rng).velocity for _ in range(400))
+        state = PlayerGameState(player=fresh)
+        fresh_velo = statistics.mean(
+            throw(fresh, rng, state).velocity for _ in range(400)
+        )
 
-        fresh.pitches_thrown = 160  # well past his stamina
-        tired_velo = statistics.mean(Pitch.thrown(fresh, rng).velocity for _ in range(400))
+        state.pitches_thrown = 160  # well past his stamina
+        tired_velo = statistics.mean(
+            throw(fresh, rng, state).velocity for _ in range(400)
+        )
         self.assertLess(tired_velo, fresh_velo)
+
+    def test_pitch_count_no_longer_lives_on_player(self):
+        """v0.1 bug: pitches_thrown on Player drifted across games."""
+        arm = Player.generate(make_rng(3), "Arm", Position.SP)
+        self.assertFalse(hasattr(arm, "pitches_thrown"))
+        a, b = PlayerGameState(player=arm), PlayerGameState(player=arm)
+        a.record_pitch()
+        self.assertEqual(b.pitches_thrown, 0, "two games shared one pitch count")
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +177,7 @@ class TestBattedBall(unittest.TestCase):
 
     def test_exit_velocity_in_realistic_range(self):
         for _ in range(2000):
-            pitch = Pitch.thrown(self.pitcher, self.rng)
+            pitch = throw(self.pitcher, self.rng)
             bb = BattedBall.from_contact(self.batter, pitch, self.rng)
             self.assertGreater(bb.exit_velocity, 20.0)
             self.assertLess(bb.exit_velocity, 125.0)
@@ -135,7 +185,7 @@ class TestBattedBall(unittest.TestCase):
     def test_average_exit_velocity_matches_mlb(self):
         evs = []
         for _ in range(5000):
-            pitch = Pitch.thrown(self.pitcher, self.rng)
+            pitch = throw(self.pitcher, self.rng)
             evs.append(BattedBall.from_contact(self.batter, pitch, self.rng).exit_velocity)
         avg = statistics.mean(evs)
         self.assertGreater(avg, 85.0, f"avg EV {avg:.1f} too low")
@@ -148,7 +198,7 @@ class TestBattedBall(unittest.TestCase):
         slap.hitting.bat_speed = 65.0
 
         rng_a, rng_b = make_rng(21), make_rng(21)
-        pitches = [Pitch.thrown(self.pitcher, make_rng(31)) for _ in range(1500)]
+        pitches = [throw(self.pitcher, make_rng(31)) for _ in range(1500)]
         slug_ev = statistics.mean(
             BattedBall.from_contact(slugger, p, rng_a).exit_velocity for p in pitches
         )
@@ -163,7 +213,7 @@ class TestBattedBall(unittest.TestCase):
         chopper = average_player("Chopper")
         chopper.hitting.attack_angle = 0.0
 
-        pitches = [Pitch.thrown(self.pitcher, make_rng(41)) for _ in range(2000)]
+        pitches = [throw(self.pitcher, make_rng(41)) for _ in range(2000)]
         rng_a, rng_b = make_rng(51), make_rng(51)
         up_la = statistics.mean(
             BattedBall.from_contact(uppercut, p, rng_a).launch_angle for p in pitches
@@ -210,8 +260,8 @@ class TestBattedBall(unittest.TestCase):
         self.assertGreater(far, short)
 
     def test_wall_is_closer_down_the_lines(self):
-        center = BattedBall(100, 30, 0.0, 380, 5).wall_distance
-        line = BattedBall(100, 30, 45.0, 380, 5).wall_distance
+        center = DEFAULT_PARK.wall_distance(0.0)
+        line = DEFAULT_PARK.wall_distance(45.0)
         self.assertGreater(center, line)
         self.assertAlmostEqual(center, 400.0, delta=1.0)
         self.assertAlmostEqual(line, 330.0, delta=1.0)
@@ -250,36 +300,45 @@ class TestAtBat(unittest.TestCase):
 
     def test_at_bat_always_terminates(self):
         for seed in range(300):
-            ab = AtBat(
-                batter=self.batter,
-                pitcher=self.pitcher,
-                defense=self.defense,
-                rng=make_rng(seed),
+            ab = AtBat(batter=self.batter, pitcher=self.pitcher, rng=make_rng(seed))
+            outcome = ab.simulate()
+            self.assertIn(
+                outcome.terminal_call,
+                (
+                    PitchCall.BALL,
+                    PitchCall.CALLED_STRIKE,
+                    PitchCall.SWINGING_STRIKE,
+                    PitchCall.HIT_BY_PITCH,
+                    PitchCall.IN_PLAY,
+                ),
             )
-            result = ab.simulate()
-            self.assertIsInstance(result, AtBatResult)
             self.assertLess(len(ab.pitches), 60, "at-bat ran away")
+
+    def test_outcome_carries_no_base_state(self):
+        """The v0.2 contradiction: AtBat cannot know runs, outs, or advances."""
+        ab = AtBat(batter=self.batter, pitcher=self.pitcher, rng=make_rng(1))
+        outcome = ab.simulate()
+        for forbidden in ("runs_scored", "outs_recorded", "advancements"):
+            self.assertFalse(
+                hasattr(outcome, forbidden),
+                f"PlateAppearanceOutcome should not carry {forbidden}",
+            )
 
     def test_walk_requires_four_balls(self):
         for seed in range(400):
-            ab = AtBat(
-                batter=self.batter,
-                pitcher=self.pitcher,
-                defense=self.defense,
-                rng=make_rng(seed),
-            )
-            if ab.simulate() is AtBatResult.WALK:
+            ab = AtBat(batter=self.batter, pitcher=self.pitcher, rng=make_rng(seed))
+            outcome = ab.simulate()
+            if outcome.terminal_call is PitchCall.BALL:
                 self.assertEqual(ab.balls, 4)
 
     def test_strikeout_requires_three_strikes(self):
         for seed in range(400):
-            ab = AtBat(
-                batter=self.batter,
-                pitcher=self.pitcher,
-                defense=self.defense,
-                rng=make_rng(seed),
-            )
-            if ab.simulate() is AtBatResult.STRIKEOUT:
+            ab = AtBat(batter=self.batter, pitcher=self.pitcher, rng=make_rng(seed))
+            outcome = ab.simulate()
+            if outcome.terminal_call in (
+                PitchCall.CALLED_STRIKE,
+                PitchCall.SWINGING_STRIKE,
+            ):
                 self.assertEqual(ab.strikes, 3)
 
     def test_good_eye_draws_more_walks(self):
@@ -290,13 +349,17 @@ class TestAtBat(unittest.TestCase):
 
         def walk_rate(batter, seed):
             rng = make_rng(seed)
+            state = PlayerGameState(player=self.pitcher)
             walks = 0
             for _ in range(3000):
-                self.pitcher.rest()  # isolate the batter, no fatigue drift
-                if (
-                    AtBat(batter=batter, pitcher=self.pitcher, defense=self.defense, rng=rng).simulate()
-                    is AtBatResult.WALK
-                ):
+                state.reset()  # isolate the batter, no fatigue drift
+                ab = AtBat(
+                    batter=batter,
+                    pitcher=self.pitcher,
+                    pitcher_state=state,
+                    rng=rng,
+                )
+                if ab.simulate().terminal_call is PitchCall.BALL:
                     walks += 1
             return walks / 3000
 
@@ -310,12 +373,19 @@ class TestAtBat(unittest.TestCase):
 
         def k_rate(batter, seed):
             rng = make_rng(seed)
+            state = PlayerGameState(player=self.pitcher)
             ks = 0
             for _ in range(3000):
-                self.pitcher.rest()  # isolate the batter, no fatigue drift
-                if (
-                    AtBat(batter=batter, pitcher=self.pitcher, defense=self.defense, rng=rng).simulate()
-                    is AtBatResult.STRIKEOUT
+                state.reset()  # isolate the batter, no fatigue drift
+                ab = AtBat(
+                    batter=batter,
+                    pitcher=self.pitcher,
+                    pitcher_state=state,
+                    rng=rng,
+                )
+                if ab.simulate().terminal_call in (
+                    PitchCall.CALLED_STRIKE,
+                    PitchCall.SWINGING_STRIKE,
                 ):
                     ks += 1
             return ks / 3000
@@ -348,35 +418,38 @@ class TestBaseRunners(unittest.TestCase):
 
     def test_home_run_clears_the_bases(self):
         runners = BaseRunners(first=self.a, second=self.b, third=self.c)
-        scored = runners.advance_all(4, self.d, make_rng())
-        self.assertEqual(len(scored), 4)
+        result = hit_advance(runners, 4, self.d, make_rng())
+        self.assertEqual(len(scored_runners(result)), 4)
+        self.assertEqual(result.runs_scored, 4)
         self.assertTrue(runners.is_empty)
 
     def test_walk_with_bases_loaded_forces_in_a_run(self):
         runners = BaseRunners(first=self.a, second=self.b, third=self.c)
-        scored = runners.force_advance(self.d)
-        self.assertEqual(scored, [self.c])
+        result = BASERUNNING.force_advance(self.d, runners)
+        runners.apply(result)
+        self.assertEqual(scored_runners(result), [self.c])
         self.assertIs(runners.first, self.d)
         self.assertIs(runners.second, self.a)
         self.assertIs(runners.third, self.b)
 
     def test_walk_with_runner_on_second_only_does_not_force(self):
         runners = BaseRunners(second=self.b)
-        scored = runners.force_advance(self.d)
-        self.assertEqual(scored, [])
+        result = BASERUNNING.force_advance(self.d, runners)
+        runners.apply(result)
+        self.assertEqual(scored_runners(result), [])
         self.assertIs(runners.second, self.b, "runner on second should hold")
         self.assertIs(runners.first, self.d)
 
     def test_runner_on_third_scores_on_a_single(self):
         runners = BaseRunners(third=self.c)
-        scored = runners.advance_all(1, self.d, make_rng())
-        self.assertIn(self.c, scored)
+        result = hit_advance(runners, 1, self.d, make_rng())
+        self.assertIn(self.c, scored_runners(result))
         self.assertIs(runners.first, self.d)
 
     def test_runners_never_pass_each_other(self):
         for seed in range(200):
             runners = BaseRunners(first=self.a, second=self.b, third=self.c)
-            runners.advance_all(1, self.d, make_rng(seed))
+            hit_advance(runners, 1, self.d, make_rng(seed))
             occupied = [r for r in (runners.first, runners.second, runners.third) if r]
             self.assertEqual(len(occupied), len(set(id(r) for r in occupied)))
 
@@ -391,11 +464,25 @@ class TestBaseRunners(unittest.TestCase):
             count = 0
             for _ in range(3000):
                 runners = BaseRunners(second=runner)
-                if runner in runners.advance_all(1, self.d, rng):
+                result = BASERUNNING.advance_on_reach(self.d, 1, runners, rng)
+                if runner in scored_runners(result):
                     count += 1
             return count / 3000
 
         self.assertGreater(scores_from_second(fast, 5), scores_from_second(slow, 5))
+
+    def test_force_state_tracks_who_must_run(self):
+        empty = BaseRunners().force_state()
+        self.assertTrue(empty.first, "the batter always forces the runner on first")
+        self.assertFalse(empty.second)
+
+        loaded = BaseRunners(first=self.a, second=self.b, third=self.c).force_state()
+        self.assertTrue(loaded.second)
+        self.assertTrue(loaded.third)
+        self.assertEqual(loaded.lead_forced_base, 4)
+
+        corners = BaseRunners(third=self.c).force_state()
+        self.assertFalse(corners.second, "a runner on third alone is not forced")
 
 
 class TestHalfInning(unittest.TestCase):
@@ -467,7 +554,7 @@ class TestGame(unittest.TestCase):
             away = Team.generate(rng, "Away")
             home = Team.generate(rng, "Home")
             r = Game.start(home, away, rng).simulate()
-            return r.home_score, r.away_score, len(r.play_by_play)
+            return r.home_score, r.away_score, len(r.plays)
 
         self.assertEqual(play(2024), play(2024))
 
@@ -488,8 +575,9 @@ class TestGame(unittest.TestCase):
         away = Team.generate(rng, "Away")
         home = Team.generate(rng, "Home")
         result = Game.start(home, away, rng).simulate()
-        self.assertGreater(len(result.play_by_play), 50)
-        self.assertTrue(all(e.description for e in result.play_by_play))
+        self.assertGreater(len(result.plays), 50)
+        self.assertTrue(all(p.description for p in result.plays))
+        self.assertTrue(all(p.pitch_history for p in result.plays))
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +676,7 @@ class TestTeamValidation(unittest.TestCase):
     def test_short_lineup_rejected(self):
         rng = make_rng()
         team = Team.generate(rng, "T")
-        team.lineup = team.lineup[:8]
+        team.lineup = Lineup(batting_order=team.lineup[:8])
         with self.assertRaises(ValueError):
             team.validate()
 
@@ -609,6 +697,187 @@ class TestTeamValidation(unittest.TestCase):
     def test_generated_team_is_valid(self):
         rng = make_rng()
         Team.generate(rng, "T").validate()
+
+
+# ---------------------------------------------------------------------------
+# The engine seams: each stage testable on its own
+# ---------------------------------------------------------------------------
+
+
+class TestFieldingEngine(unittest.TestCase):
+    """Physical outcomes only. Hit vs. error is not this engine's job."""
+
+    def setUp(self):
+        self.rng = make_rng()
+        self.defense = Team.generate(self.rng, "Defense")
+        self.engine = FieldingEngine()
+
+    def test_over_the_fence_needs_no_fielder(self):
+        blast = BattedBall(110.0, 30.0, 0.0, 450.0, 5.5)
+        result = self.engine.resolve(blast, self.defense, Situation(), self.rng)
+        self.assertIs(result.outcome, FieldingOutcome.OVER_THE_FENCE)
+        self.assertIsNone(result.fielder)
+
+    def test_way_foul_is_out_of_play(self):
+        hooked = BattedBall(95.0, 30.0, 60.0, 300.0, 4.0)
+        result = self.engine.resolve(hooked, self.defense, Situation(), self.rng)
+        self.assertIs(result.outcome, FieldingOutcome.FOUL)
+
+    def test_never_returns_a_scoring_judgment(self):
+        """The enum has no HIT or ERROR member; that is deliberate."""
+        names = {m.name for m in FieldingOutcome}
+        self.assertNotIn("HIT", names)
+        self.assertNotIn("ERROR", names)
+
+    def test_ground_balls_are_fielded_along_their_path(self):
+        """The largest v0.1 calibration bug.
+
+        A grounder first touches grass 60-80 ft from the plate while
+        infielders play at ~145 ft. Judging it by the landing point put the
+        ball 75 ft from the shortstop and made nearly every grounder a hit.
+        This one is hit straight at the shortstop but lands short of him.
+        """
+        at_the_shortstop = BattedBall(85.0, 2.0, -12.0, 70.0, 0.0)
+        outcomes = [
+            self.engine.resolve(
+                at_the_shortstop, self.defense, Situation(), make_rng(s)
+            ).outcome
+            for s in range(200)
+        ]
+        fielded = sum(o is FieldingOutcome.FIELDED_CLEANLY for o in outcomes)
+        self.assertGreater(
+            fielded, 150, "a grounder hit right at the shortstop is not being fielded"
+        )
+
+    def test_hard_ball_up_the_middle_gets_through(self):
+        """The flip side: the gap between short and second is a real hole."""
+        up_the_middle = BattedBall(98.0, 2.0, 0.0, 95.0, 0.0)
+        outcomes = [
+            self.engine.resolve(
+                up_the_middle, self.defense, Situation(), make_rng(s)
+            ).outcome
+            for s in range(50)
+        ]
+        self.assertTrue(all(o is FieldingOutcome.THROUGH_INFIELD for o in outcomes))
+
+
+class TestOfficialScorer(unittest.TestCase):
+    """The same physical play scores differently depending on judgment."""
+
+    def setUp(self):
+        self.scorer = OfficialScorer()
+        self.grounder = BattedBall(95.0, 2.0, 0.0, 90.0, 0.0)
+
+    def _score(self, outcome, bases=0, safe=False):
+        from baseball import BaserunningResult
+
+        return self.scorer.score(
+            PitchCall.IN_PLAY,
+            self.grounder,
+            FieldingResult(outcome=outcome, fielder=average_player("F")),
+            BaserunningResult(batter_bases=bases, batter_safe=safe),
+            Situation(),
+        ).result
+
+    def test_misplay_is_an_error_not_a_hit(self):
+        self.assertIs(self._score(FieldingOutcome.MISPLAYED, 1, True), AtBatResult.ERROR)
+
+    def test_same_clean_field_is_out_or_infield_hit(self):
+        """Identical fielding; the baserunning result decides the ruling."""
+        self.assertIs(
+            self._score(FieldingOutcome.FIELDED_CLEANLY, 0, False),
+            AtBatResult.GROUND_OUT,
+        )
+        self.assertIs(
+            self._score(FieldingOutcome.FIELDED_CLEANLY, 1, True),
+            AtBatResult.SINGLE,
+        )
+
+    def test_bases_decide_the_size_of_the_hit(self):
+        self.assertIs(self._score(FieldingOutcome.DROPPED_IN, 1, True), AtBatResult.SINGLE)
+        self.assertIs(self._score(FieldingOutcome.DROPPED_IN, 2, True), AtBatResult.DOUBLE)
+        self.assertIs(self._score(FieldingOutcome.DROPPED_IN, 3, True), AtBatResult.TRIPLE)
+
+    def test_strikeout_and_walk_come_from_the_count(self):
+        for call, expected in (
+            (PitchCall.SWINGING_STRIKE, AtBatResult.STRIKEOUT),
+            (PitchCall.CALLED_STRIKE, AtBatResult.STRIKEOUT),
+            (PitchCall.BALL, AtBatResult.WALK),
+            (PitchCall.HIT_BY_PITCH, AtBatResult.HIT_BY_PITCH),
+        ):
+            self.assertIs(
+                self.scorer.score(call, None, None, None, Situation()).result, expected
+            )
+
+
+class TestPlayIsComplete(unittest.TestCase):
+    """Play must carry an int out count -- that is what unlocks double plays."""
+
+    def test_outs_recorded_is_an_integer(self):
+        rng = make_rng(17)
+        away = Team.generate(rng, "Away")
+        home = Team.generate(rng, "Home")
+        result = Game.start(home, away, rng).simulate()
+        for play in result.plays:
+            self.assertIsInstance(play.outs_recorded, int)
+            self.assertNotIsInstance(play.outs_recorded, bool)
+
+    def test_runs_reconcile_with_advancements(self):
+        rng = make_rng(23)
+        away = Team.generate(rng, "Away")
+        home = Team.generate(rng, "Home")
+        result = Game.start(home, away, rng).simulate()
+        for play in result.plays:
+            scored = sum(1 for a in play.advancements if a.scored)
+            self.assertEqual(
+                scored, play.runs_scored, f"{play.description}: advancements disagree"
+            )
+
+    def test_total_runs_match_the_final_score(self):
+        rng = make_rng(31)
+        away = Team.generate(rng, "Away")
+        home = Team.generate(rng, "Home")
+        result = Game.start(home, away, rng).simulate()
+        self.assertEqual(
+            sum(p.runs_scored for p in result.plays),
+            result.home_score + result.away_score,
+        )
+
+
+class TestSituationIsImmutable(unittest.TestCase):
+    def test_engines_cannot_mutate_the_game_through_it(self):
+        situation = Situation(inning=3, outs=2)
+        with self.assertRaises(Exception):
+            situation.outs = 0
+
+    def test_base_runners_are_snapshotted(self):
+        live = BaseRunners(first=average_player("A"))
+        snap = live.snapshot()
+        live.clear()
+        self.assertIsNotNone(snap.first, "snapshot followed the live base state")
+
+
+class TestPlayerIsPersistent(unittest.TestCase):
+    """A Player must be safe to reuse across simulations."""
+
+    def test_same_player_in_two_games_does_not_interfere(self):
+        rng = make_rng(64)
+        shared = Team.generate(rng, "Shared")
+        other_a = Team.generate(rng, "A")
+        other_b = Team.generate(rng, "B")
+
+        Game.start(shared, other_a, make_rng(1)).simulate()
+        first_pitcher = shared.starting_pitcher
+        carried = shared.state_for(first_pitcher).pitches_thrown
+
+        Game.start(shared, other_b, make_rng(1)).simulate()
+        self.assertGreater(carried, 0, "no pitches were thrown to check")
+        # Game.start resets per-game state, so fatigue cannot snowball.
+        self.assertLessEqual(
+            shared.state_for(first_pitcher).pitches_thrown,
+            first_pitcher.pitching.stamina + 40,
+            "pitch count carried across games",
+        )
 
 
 if __name__ == "__main__":

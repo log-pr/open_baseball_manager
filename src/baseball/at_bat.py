@@ -1,28 +1,34 @@
 """One plate appearance, resolved pitch by pitch.
 
-This module holds the two smallest testable units in the whole simulation:
+AtBat produces a deliberately narrow outcome: the pitches thrown, how it
+terminated, and the batted ball if there was one. No base state, no runs,
+no outs.
 
-  throw_next_pitch() - one pitch, start to finish
-  simulate()         - loop pitches until the at-bat resolves
-
-Everything above this (innings, games, seasons) is just loops over these.
+That narrowness is the point. v0.2 asked this class to report runs,
+advancements, and outs, which it structurally cannot know -- a ground ball
+is only a double play given the force state, a fly ball is only a sacrifice
+given a runner on third. Either it takes ownership of baserunning, or those
+fields stay empty. Instead BaserunningEngine turns this outcome plus the
+base state into advancements, and AtBat stays testable without constructing
+a game.
 """
 
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from .batted_ball import BattedBall
-from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
-from .enums import AtBatResult, PitchCall, SwingOutcome, grade_to_z
+from .config import DEFAULT_CONFIG, SimulationConfig
+from .engines import BattingEngine, PitchingEngine
+from .enums import PitchCall, SwingOutcome
+from .events import PlateAppearanceOutcome
 from .pitch import Pitch
+from .state import PlayerGameState, Situation
 
 if TYPE_CHECKING:  # pragma: no cover
     from .player import Player
-    from .team import Team
 
 
 @dataclass
@@ -31,16 +37,25 @@ class AtBat:
 
     batter: "Player"
     pitcher: "Player"
-    defense: Optional["Team"] = None
+    pitcher_state: PlayerGameState = None  # type: ignore[assignment]
     rng: random.Random = field(default_factory=random.Random)
     config: SimulationConfig = DEFAULT_CONFIG
-    park: ParkConfig = DEFAULT_PARK
+    pitching_engine: Optional[PitchingEngine] = None
+    batting_engine: Optional[BattingEngine] = None
 
     balls: int = 0
     strikes: int = 0
     fouls: int = 0
     pitches: List[Pitch] = field(default_factory=list)
     batted_ball: Optional[BattedBall] = None
+
+    def __post_init__(self) -> None:
+        if self.pitcher_state is None:
+            self.pitcher_state = PlayerGameState(player=self.pitcher)
+        if self.pitching_engine is None:
+            self.pitching_engine = PitchingEngine(self.config)
+        if self.batting_engine is None:
+            self.batting_engine = BattingEngine(self.config)
 
     @property
     def count(self) -> str:
@@ -50,85 +65,22 @@ class AtBat:
     def is_complete(self) -> bool:
         return self.balls >= 4 or self.strikes >= 3
 
-    # --- Batter decisions ------------------------------------------------
-
-    def _swing_probability(self, pitch: Pitch) -> float:
-        """How likely the batter is to offer at this pitch.
-
-        Good plate discipline (eye grade) mostly shows up as laying off
-        pitches out of the zone rather than swinging more at strikes.
-        """
-        cfg = self.config
-        eye_z = grade_to_z(self.batter.hitting.eye_grade)
-
-        if pitch.in_zone:
-            base = cfg.zone_swing_rate
-            # With two strikes he has to protect.
-            if self.strikes == 2:
-                base = cfg.two_strike_zone_swing_rate
-            return max(
-                cfg.zone_swing_min,
-                min(cfg.zone_swing_max, base + eye_z * cfg.zone_swing_eye_weight),
-            )
-
-        # Chase rate: better eyes chase less.
-        base = cfg.chase_rate_base - eye_z * cfg.eye_grade_weight
-        # Pitches just off the plate are more tempting than way outside.
-        nearness = max(
-            0.0,
-            1.0
-            - (pitch.distance_from_center - cfg.chase_nearness_offset)
-            / cfg.chase_nearness_scale,
-        )
-        base *= max(cfg.chase_nearness_floor, nearness)
-        if self.strikes == 2:
-            base += cfg.two_strike_chase_bonus
-        return max(cfg.chase_min, min(cfg.chase_max, base))
-
-    def _whiff_probability(self, pitch: Pitch) -> float:
-        """How likely a swing misses entirely."""
-        cfg = self.config
-        hit_z = grade_to_z(self.batter.hitting.hit_grade)
-        base = cfg.whiff_base - hit_z * cfg.whiff_hit_grade_weight
-
-        # Velocity, spin, and location all make contact harder.
-        base += (
-            pitch.effective_velocity - cfg.whiff_velocity_baseline
-        ) * cfg.whiff_velocity_weight
-        base += (pitch.spin_rate - cfg.whiff_spin_baseline) * cfg.whiff_spin_weight
-        base += (
-            max(0.0, pitch.distance_from_center - cfg.whiff_location_offset)
-            * cfg.whiff_location_weight
-        )
-
-        # Longer swings are more susceptible to missing.
-        base += (
-            self.batter.hitting.swing_length - cfg.whiff_swing_length_baseline
-        ) * cfg.whiff_swing_length_weight
-
-        return max(cfg.whiff_min, min(cfg.whiff_max, base))
-
-    def _foul_probability(self, pitch: Pitch) -> float:
-        """Given contact, how often it goes foul."""
-        cfg = self.config
-        hit_z = grade_to_z(self.batter.hitting.hit_grade)
-        base = cfg.foul_rate_base - hit_z * cfg.foul_hit_grade_weight
-        base += (
-            max(0.0, pitch.distance_from_center - cfg.foul_location_offset)
-            * cfg.foul_location_weight
-        )
-        return max(cfg.foul_min, min(cfg.foul_max, base))
-
     # --- Pitch resolution ------------------------------------------------
 
-    def throw_next_pitch(self) -> Tuple[PitchCall, Pitch]:
+    def throw_next_pitch(
+        self, situation: Optional[Situation] = None
+    ) -> Tuple[PitchCall, Pitch]:
         """Throw and resolve exactly one pitch. The smallest test unit."""
         if self.is_complete:
             raise RuntimeError("at-bat is already complete")
 
-        pitch = Pitch.thrown(self.pitcher, self.rng, self.config)
+        situation = (situation or Situation()).with_count(self.balls, self.strikes)
+
+        pitch = self.pitching_engine.throw_pitch(
+            self.pitcher, self.pitcher_state, self.batter, situation, self.rng
+        )
         self.pitches.append(pitch)
-        self.pitcher.pitches_thrown += 1
+        self.pitcher_state.record_pitch()
 
         # Hit by pitch: only for pitches well inside and off the plate.
         if (
@@ -138,16 +90,14 @@ class AtBat:
             if self.rng.random() < self.config.hbp_rate:
                 return PitchCall.HIT_BY_PITCH, pitch
 
-        swings = self.rng.random() < self._swing_probability(pitch)
-
-        if not swings:
+        if not self.batting_engine.decide_swing(self.batter, pitch, situation, self.rng):
             if pitch.in_zone:
                 self.strikes += 1
                 return PitchCall.CALLED_STRIKE, pitch
             self.balls += 1
             return PitchCall.BALL, pitch
 
-        outcome = self._resolve_swing(pitch)
+        outcome = self.batting_engine.resolve_swing(self.batter, pitch, self.rng)
 
         if outcome is SwingOutcome.WHIFF:
             self.strikes += 1
@@ -160,38 +110,39 @@ class AtBat:
                 self.strikes += 1
             return PitchCall.FOUL, pitch
 
-        self.batted_ball = BattedBall.from_contact(
-            self.batter, pitch, self.rng, self.config
-        )
+        self.batted_ball = self.batting_engine.make_contact(self.batter, pitch, self.rng)
         return PitchCall.IN_PLAY, pitch
-
-    def _resolve_swing(self, pitch: Pitch) -> SwingOutcome:
-        if self.rng.random() < self._whiff_probability(pitch):
-            return SwingOutcome.WHIFF
-        if self.rng.random() < self._foul_probability(pitch):
-            return SwingOutcome.FOUL
-        return SwingOutcome.CONTACT
 
     # --- Full plate appearance -------------------------------------------
 
-    def simulate(self) -> AtBatResult:
-        """Loop pitches until the plate appearance resolves."""
+    def simulate(
+        self, situation: Optional[Situation] = None
+    ) -> PlateAppearanceOutcome:
+        """Loop pitches until the plate appearance resolves.
+
+        Terminates on a strikeout, a walk, a hit by pitch, or a ball in
+        play. What happens to the ball in play is somebody else's job.
+        """
         while True:
-            call, _pitch = self.throw_next_pitch()
+            call, pitch = self.throw_next_pitch(situation)
 
             if call is PitchCall.HIT_BY_PITCH:
-                return AtBatResult.HIT_BY_PITCH
+                return PlateAppearanceOutcome(
+                    pitch_history=list(self.pitches), terminal_call=call
+                )
 
             if call is PitchCall.IN_PLAY:
-                assert self.batted_ball is not None
-                if self.defense is None:
-                    # No defense supplied: useful for isolated physics tests.
-                    return AtBatResult.SINGLE
-                return self.batted_ball.resolve(
-                    self.defense, self.rng, self.config, self.park
+                return PlateAppearanceOutcome(
+                    pitch_history=list(self.pitches),
+                    terminal_call=call,
+                    batted_ball=self.batted_ball,
                 )
 
             if self.balls >= 4:
-                return AtBatResult.WALK
+                return PlateAppearanceOutcome(
+                    pitch_history=list(self.pitches), terminal_call=PitchCall.BALL
+                )
             if self.strikes >= 3:
-                return AtBatResult.STRIKEOUT
+                return PlateAppearanceOutcome(
+                    pitch_history=list(self.pitches), terminal_call=call
+                )

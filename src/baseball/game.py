@@ -1,37 +1,54 @@
 """Half-innings and full games.
 
-Once AtBat works, these layers are mostly bookkeeping: loop until three
-outs, loop until nine innings, keep score.
+HalfInning is where the engines get composed. It owns the base state and is
+the only thing that mutates it; everything else hands it value objects.
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field, replace
+from typing import List, Optional
 
 from .at_bat import AtBat
 from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
-from .enums import AtBatResult, grade_to_z
+from .engines import (
+    BaserunningEngine,
+    BattingEngine,
+    FieldingEngine,
+    OfficialScorer,
+    PitchingEngine,
+)
+from .enums import PitchCall
+from .events import BaserunningResult, Play
 from .player import Player
-from .team import BaseRunners, Team
+from .state import BaseRunners, Situation
+from .team import Team
 
 
 @dataclass
-class PlayEvent:
-    """One line of play-by-play."""
+class Engines:
+    """The five engines, built once and shared across a game."""
 
-    inning: int
-    half: str  # "top" or "bottom"
-    batter: str
-    pitcher: str
-    result: AtBatResult
-    pitches: int
-    runs_scored: int
-    description: str
+    pitching: PitchingEngine
+    batting: BattingEngine
+    fielding: FieldingEngine
+    baserunning: BaserunningEngine
+    scorer: OfficialScorer
 
-    def __str__(self) -> str:
-        return self.description
+    @classmethod
+    def build(
+        cls,
+        config: SimulationConfig = DEFAULT_CONFIG,
+        park: ParkConfig = DEFAULT_PARK,
+    ) -> "Engines":
+        return cls(
+            pitching=PitchingEngine(config),
+            batting=BattingEngine(config),
+            fielding=FieldingEngine(config, park),
+            baserunning=BaserunningEngine(config),
+            scorer=OfficialScorer(config),
+        )
 
 
 @dataclass
@@ -43,7 +60,7 @@ class GameResult:
     home_score: int
     away_score: int
     innings_played: int
-    play_by_play: List[PlayEvent] = field(default_factory=list)
+    plays: List[Play] = field(default_factory=list)
 
     @property
     def winner(self) -> Optional[Team]:
@@ -63,7 +80,20 @@ class GameResult:
 
 @dataclass
 class HalfInning:
-    """One half-inning: bat until three outs."""
+    """One half-inning: bat until three outs.
+
+    The composition sequence per plate appearance is:
+
+      1. snapshot the Situation
+      2. AtBat.simulate()            -> PlateAppearanceOutcome
+      3. FieldingEngine.resolve()    -> FieldingResult  (did anyone catch it)
+      4. BaserunningEngine.advance() -> advancements, runs, outs
+      5. OfficialScorer.score()      -> AtBatResult, RBI
+      6. assemble the Play, apply advancements, increment outs
+
+    Each arrow is a testable seam: the failing stage tells you which engine
+    broke.
+    """
 
     batting_team: Team
     defending_team: Team
@@ -72,19 +102,34 @@ class HalfInning:
     half: str = "top"
     config: SimulationConfig = DEFAULT_CONFIG
     park: ParkConfig = DEFAULT_PARK
+    engines: Optional[Engines] = None
+    score_differential: int = 0
 
     outs: int = 0
     runs: int = 0
-    baserunners: BaseRunners = field(default_factory=BaseRunners)
-    events: List[PlayEvent] = field(default_factory=list)
+    base_runners: BaseRunners = field(default_factory=BaseRunners)
+    plays: List[Play] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.engines is None:
+            self.engines = Engines.build(self.config, self.park)
+
+    def situation(self) -> Situation:
+        """An immutable snapshot. Engines cannot mutate the game through it."""
+        return Situation(
+            inning=self.inning,
+            half=self.half,
+            outs=self.outs,
+            base_runners=self.base_runners.snapshot(),
+            score_differential=self.score_differential,
+        )
 
     def play(self, max_runs: Optional[int] = None) -> int:
         """Play until three outs. Returns runs scored."""
         while self.outs < 3:
             self._attempt_steal()
 
-            # Go to the bullpen if the current arm is gassed. Without this
-            # one pitcher absorbs the whole game and fatigue snowballs.
+            # Go to the bullpen if the current arm is gassed.
             if self.defending_team.needs_relief():
                 self.defending_team.bring_in_reliever()
 
@@ -92,32 +137,7 @@ class HalfInning:
             pitcher = self.defending_team.current_pitcher
             assert pitcher is not None
 
-            at_bat = AtBat(
-                batter=batter,
-                pitcher=pitcher,
-                defense=self.defending_team,
-                rng=self.rng,
-                config=self.config,
-                park=self.park,
-            )
-            result = at_bat.simulate()
-            runs_on_play = self._apply_result(batter, result)
-
-            self.batting_team.stats_for(batter).record_result(result)
-            self._record_pitching(pitcher, result, runs_on_play)
-
-            self.events.append(
-                PlayEvent(
-                    inning=self.inning,
-                    half=self.half,
-                    batter=batter.name,
-                    pitcher=pitcher.name,
-                    result=result,
-                    pitches=len(at_bat.pitches),
-                    runs_scored=runs_on_play,
-                    description=self._describe(batter, at_bat, result, runs_on_play),
-                )
-            )
+            self.plays.append(self._plate_appearance(batter, pitcher))
 
             # Walk-off: stop the moment the home team goes ahead.
             if max_runs is not None and self.runs >= max_runs:
@@ -125,123 +145,102 @@ class HalfInning:
 
         return self.runs
 
-    # --- Result application ----------------------------------------------
+    def _plate_appearance(self, batter: Player, pitcher: Player) -> Play:
+        engines = self.engines
+        assert engines is not None
+        situation = self.situation()
 
-    def _apply_result(self, batter: Player, result: AtBatResult) -> int:
-        before = self.runs
+        at_bat = AtBat(
+            batter=batter,
+            pitcher=pitcher,
+            pitcher_state=self.defending_team.state_for(pitcher),
+            rng=self.rng,
+            config=self.config,
+            pitching_engine=engines.pitching,
+            batting_engine=engines.batting,
+        )
+        outcome = at_bat.simulate(situation)
 
-        if result in (AtBatResult.WALK, AtBatResult.HIT_BY_PITCH):
-            scored = self.baserunners.force_advance(batter)
-            self._score(scored, batter)
-
-        elif result is AtBatResult.STRIKEOUT:
-            self.outs += 1
-
-        elif result.is_hit:
-            scored = self.baserunners.advance_all(
-                result.bases, batter, self.rng, self.config
+        fielding_result = None
+        if outcome.terminal_call is PitchCall.IN_PLAY:
+            assert outcome.batted_ball is not None
+            fielding_result = engines.fielding.resolve(
+                outcome.batted_ball, self.defending_team, situation, self.rng
             )
-            self._score(scored, batter)
-
-        elif result is AtBatResult.ERROR:
-            scored = self.baserunners.advance_all(1, batter, self.rng, self.config)
-            self._score(scored, batter)
-
-        elif result is AtBatResult.SAC_FLY:
-            self.outs += 1
-            if self.baserunners.third is not None:
-                self._score([self.baserunners.third], batter)
-                self.baserunners.third = None
-
-        elif result is AtBatResult.GROUND_OUT:
-            self.outs += 1
-            # A runner on third usually scores on an infield out with
-            # fewer than two outs.
-            if self.outs < 3 and self.baserunners.third is not None:
-                if self.rng.random() < self.config.score_from_third_on_ground_out:
-                    self._score([self.baserunners.third], batter)
-                    self.baserunners.third = None
-
-        elif result in (AtBatResult.FLY_OUT, AtBatResult.LINE_OUT, AtBatResult.POP_OUT):
-            self.outs += 1
-            # Sacrifice fly: runner tags from third on a fly ball.
-            if (
-                result is AtBatResult.FLY_OUT
-                and self.outs < 3
-                and self.baserunners.third is not None
-                and self.rng.random() < self.config.tag_from_third_rate
-            ):
-                self._score([self.baserunners.third], batter)
-                self.baserunners.third = None
-
+            baserunning = engines.baserunning.advance(
+                batter,
+                fielding_result,
+                outcome.batted_ball,
+                self.base_runners,
+                self.outs,
+                self.rng,
+            )
+        elif outcome.terminal_call in (PitchCall.BALL, PitchCall.HIT_BY_PITCH):
+            baserunning = engines.baserunning.force_advance(batter, self.base_runners)
         else:
-            self.outs += 1
+            baserunning = BaserunningResult(outs_recorded=1)
 
-        return self.runs - before
+        decision = engines.scorer.score(
+            outcome.terminal_call,
+            outcome.batted_ball,
+            fielding_result,
+            baserunning if fielding_result is not None else None,
+            situation,
+        )
 
-    def _score(self, runners: List[Player], batter: Player) -> None:
-        for runner in runners:
-            self.runs += 1
-            self.batting_team.stats_for(runner).runs += 1
-        if runners:
-            self.batting_team.stats_for(batter).rbi += len(runners)
+        play = Play(
+            batter=batter,
+            pitcher=pitcher,
+            pitch_history=outcome.pitch_history,
+            batted_ball=outcome.batted_ball,
+            fielding_result=fielding_result,
+            official_result=decision.result,
+            outs_recorded=baserunning.outs_recorded,
+            runs_scored=baserunning.runs_scored,
+            advancements=baserunning.advancements,
+            rbi_credited=baserunning.runs_scored,
+        )
 
-    def _record_pitching(self, pitcher: Player, result: AtBatResult, runs: int) -> None:
-        stats = self.defending_team.stats_for(pitcher)
-        if result.is_out:
-            stats.outs_recorded += 1
-        if result is AtBatResult.STRIKEOUT:
-            stats.strikeouts_pitched += 1
-        elif result is AtBatResult.WALK:
-            stats.walks_allowed += 1
-        elif result.is_hit:
-            stats.hits_allowed += 1
-        stats.earned_runs += runs
+        self._apply(baserunning)
+        engines.scorer.apply_to_stats(play, self.batting_team, self.defending_team)
+
+        # Play is frozen, so the play-by-play line is attached by rebuilding.
+        return replace(play, description=self._describe(play))
+
+    # --- Applying a result to the base state ------------------------------
+
+    def _apply(self, result: BaserunningResult) -> None:
+        """The only place BaseRunners is mutated."""
+        self.base_runners.apply(result)
+        self.outs += result.outs_recorded
+        self.runs += result.runs_scored
 
     # --- Baserunning ------------------------------------------------------
 
     def _attempt_steal(self) -> None:
-        """Runner on first (and second open) may try to take second."""
-        runner = self.baserunners.first
-        if runner is None or self.baserunners.second is not None:
-            return
-        if self.rng.random() >= runner.running.steal_aggression:
-            return
-
-        catcher_arm = 50
-        for player, position in self.defending_team.fielding_positions.items():
-            if position.value == "C":
-                catcher_arm = player.fielding.arm_grade
-                break
-
-        success = (
-            runner.running.steal_success_rate
-            - grade_to_z(catcher_arm) * self.config.steal_catcher_arm_weight
+        assert self.engines is not None
+        result = self.engines.baserunning.attempt_steal(
+            self.base_runners, self.defending_team, self.rng
         )
-        if self.rng.random() < success:
-            self.baserunners.first = None
-            self.baserunners.second = runner
-        else:
-            self.baserunners.first = None
-            self.outs += 1
+        if result is not None:
+            self._apply(result)
 
     # --- Description ------------------------------------------------------
 
-    def _describe(
-        self, batter: Player, at_bat: AtBat, result: AtBatResult, runs: int
-    ) -> str:
-        label = result.name.replace("_", " ").title()
+    def _describe(self, play: Play) -> str:
+        label = play.official_result.name.replace("_", " ").title()
         detail = ""
-        if at_bat.batted_ball is not None:
-            bb = at_bat.batted_ball
+        if play.batted_ball is not None:
+            bb = play.batted_ball
             detail = (
                 f" [{bb.exit_velocity:.0f} mph, {bb.launch_angle:.0f} deg, "
                 f"{bb.distance:.0f} ft]"
             )
+        runs = play.runs_scored
         rbi = f" ({runs} run{'s' if runs != 1 else ''} score)" if runs else ""
         return (
-            f"  {batter.name}: {label} on {len(at_bat.pitches)} pitches"
-            f"{detail}{rbi} -- {self.outs} out, {self.baserunners}"
+            f"  {play.batter.name}: {label} on {play.pitches} pitches"
+            f"{detail}{rbi} -- {self.outs} out, {self.base_runners}"
         )
 
 
@@ -259,6 +258,11 @@ class Game:
     home_score: int = 0
     away_score: int = 0
     inning_counter: int = 0  # half-innings elapsed; encodes inning and top/bottom
+    engines: Optional[Engines] = None
+
+    def __post_init__(self) -> None:
+        if self.engines is None:
+            self.engines = Engines.build(self.config, self.park)
 
     @property
     def inning(self) -> int:
@@ -282,7 +286,7 @@ class Game:
         # Everybody starts the game fresh.
         for team in (home, away):
             for player in list(team.fielding_positions) + team.bullpen:
-                player.rest()
+                team.state_for(player).reset()
             if team.starting_pitcher is not None:
                 team.current_pitcher = team.starting_pitcher
         return cls(
@@ -295,7 +299,7 @@ class Game:
 
     def simulate(self, verbose: bool = False) -> GameResult:
         """Play to completion, including extra innings if tied."""
-        play_by_play: List[PlayEvent] = []
+        plays: List[Play] = []
 
         while True:
             inning = self.inning
@@ -324,15 +328,21 @@ class Game:
                 half="top" if top else "bottom",
                 config=self.config,
                 park=self.park,
+                engines=self.engines,
+                score_differential=(
+                    self.away_score - self.home_score
+                    if top
+                    else self.home_score - self.away_score
+                ),
             )
             runs = half.play(max_runs=max_runs)
-            play_by_play.extend(half.events)
+            plays.extend(half.plays)
 
             if verbose:
                 side = "Top" if top else "Bottom"
                 print(f"\n{side} {inning} -- {batting.name}")
-                for event in half.events:
-                    print(event)
+                for play in half.plays:
+                    print(play)
                 print(f"  {runs} run(s). Score: {self.away_score + (runs if top else 0)}"
                       f"-{self.home_score + (0 if top else runs)}")
 
@@ -360,5 +370,5 @@ class Game:
             home_score=self.home_score,
             away_score=self.away_score,
             innings_played=self.inning_counter // 2 + (self.inning_counter % 2),
-            play_by_play=play_by_play,
+            plays=plays,
         )
