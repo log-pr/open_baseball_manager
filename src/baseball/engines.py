@@ -664,7 +664,10 @@ class BaserunningEngine:
                     advancements.append(Advancement(runner=third, from_base=3, to_base=4))
                     runs += 1
         elif is_fly:
-            # Sacrifice fly: runner tags from third.
+            # Runner tags from third and the run scores -- but OfficialScorer
+            # rules this FLY_OUT, never SAC_FLY, so the batter is charged an
+            # at-bat he shouldn't be. Known defect; fixing it moves batting
+            # average, so it was left alone through the v0.3 restructure.
             if outs_after < 3 and third is not None:
                 if rng.random() < cfg.tag_from_third_rate:
                     advancements.append(Advancement(runner=third, from_base=3, to_base=4))

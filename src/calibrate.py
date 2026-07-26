@@ -78,6 +78,9 @@ def run(n_games: int = 200, seed: int = 7) -> None:
     doubles = results[AtBatResult.DOUBLE]
     triples = results[AtBatResult.TRIPLE]
     singles = results[AtBatResult.SINGLE]
+    # The SAC_FLY term is always zero today: nothing produces that result,
+    # so sacrifice flies are counted as at-bats here and batting average
+    # reads slightly low. Kept so this line stays correct once that's fixed.
     at_bats = total_pa - walks - hbp - results[AtBatResult.SAC_FLY]
     total_bases = singles + 2 * doubles + 3 * triples + 4 * hrs
     balls_in_play = at_bats - ks - hrs

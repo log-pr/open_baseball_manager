@@ -87,6 +87,9 @@ class AtBatResult(Enum):
     POP_OUT = auto()
     ERROR = auto()
     FIELDERS_CHOICE = auto()
+    # NOT PRODUCED. A runner tagging from third scores, but the play is
+    # recorded as FLY_OUT, so it wrongly counts as an official at-bat.
+    # Known defect carried forward from v0.1; see README "Known limitations".
     SAC_FLY = auto()
 
     @property
