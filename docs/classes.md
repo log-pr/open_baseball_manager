@@ -1,5 +1,10 @@
 # Baseball Manager — Core Simulation Classes (v0.3)
 
+> **Status: implemented.** All seven migration steps are done; the code in
+> `src/baseball/` matches this document. Deviations that were made
+> deliberately during implementation are recorded in "As-built notes" at the
+> end — read that section before treating any signature here as exact.
+
 Supersedes v0.2. Scope is still one game between two teams: no season,
 roster management, trading, or training. Those layers get built on top once
 this one is trustworthy.
@@ -499,18 +504,31 @@ MLB benchmarks, and those constants are fragile. Don't big-bang it.
 **Run `calibrate.py` before and after every step.** If runs per game or
 BABIP moves, you changed behavior, not just structure. That's the gate.
 
-| Step | Change | Risk | Why here |
+| Step | Change | Risk | Status |
 |---|---|---|---|
-| 1 | `SimulationConfig` — extract constants, change nothing else | Low | Do this first or every later step scatters knobs further |
-| 2 | `Play` + `BaserunningEngine` | Medium | Biggest cleanup, fixes the worst v0.1 code |
-| 3 | `PlayerGameState` | Low | Mechanical move of `pitches_thrown` |
-| 4 | `FieldingEngine` + `OfficialScorer` split | Medium | Needs `FieldingResult` to exist first |
-| 5 | `PitchingEngine` + `BattingEngine` | Medium | Mostly relocating working logic |
-| 6 | `Lineup` extraction | Low | Independent of everything above |
-| 7 | Per-PA RNG streams | **High** | Deliberately last — it invalidates every existing seed, so do it when the structure has stopped moving |
+| 1 | `SimulationConfig` — extract constants, change nothing else | Low | **Done.** Calibration byte-identical |
+| 2 | `Play` + `BaserunningEngine` | Medium | **Done** (with 3 and 4) |
+| 3 | `PlayerGameState` | Low | **Done** (with 2 and 4) |
+| 4 | `FieldingEngine` + `OfficialScorer` split | Medium | **Done** (with 2 and 3) |
+| 5 | `PitchingEngine` + `BattingEngine` | Medium | **Done.** Calibration byte-identical |
+| 6 | `Lineup` extraction | Low | **Done** |
+| 7 | Per-PA RNG streams | **High** | **Done last**, as planned — seeds invalidated |
 
-Step 1 before step 2 is the ordering that matters most. Step 7 last is the
-other one.
+Steps 2, 3, and 4 were done as one commit rather than three. They are not
+separable in practice: step 4 needs `FieldingResult` to exist, and `AtBat`
+cannot return a narrow outcome until fielding has moved out of it, which is
+step 2's whole purpose. Doing them in sequence would have meant writing the
+baserunning logic twice.
+
+Steps 1 through 6 were verified by requiring `calibrate.py` at 500 games to
+be **byte-identical** before and after — the harness is seeded, so a pure
+refactor reproduces exactly, which makes the gate sharp rather than
+statistical. Preserving that required keeping the RNG draw order intact
+across the split; two places in `engines.py` carry a comment marking a
+deliberately *absent* draw for this reason.
+
+Step 7 resamples by design, and it was the only step allowed to move the
+numbers.
 
 ---
 
@@ -529,3 +547,68 @@ Carried forward as known gaps, roughly in the order worth fixing:
 - **Weather and wind** — `ParkConfig` has the hooks, nothing reads them
 - **Relief strategy** — pitchers are pulled on stamina alone, no matchups
   or closers
+
+---
+
+## As-built notes
+
+Where the implementation departs from the specification above, and why.
+
+### The RNG derivation is not `hash()`
+
+The sketch was `hash((game_seed, inning, half, batter_index))`. Two
+problems, both load-bearing:
+
+1. **Python randomizes string hashing per process.** With `half` being
+   `"top"`/`"bottom"`, that formula produces a *different game every run*
+   for the same seed — precisely the property per-PA streams were added to
+   guarantee. The implementation uses SHA-256 over a formatted key, which is
+   stable across processes and machines. A golden-value test fails loudly if
+   anyone reverts it.
+2. **`batter_index` collides when a team bats around.** The same batter in
+   the same half-inning would derive a byte-identical stream and therefore a
+   byte-identical outcome. The implementation adds a plate-appearance index.
+
+A `tag` argument separates streams belonging to the same slot but different
+decisions, so a steal attempt doesn't consume draws the at-bat needs.
+
+### `BaserunningEngine.advance()` takes the batter
+
+The specified signature omits it, but the batter's own advance is part of
+the result, so it is passed explicitly.
+
+### `FieldingResult` carries `wall_distance`, not `batter_bases`
+
+How far the batter got is a baserunning outcome, so it lives on
+`BaserunningResult`. The fence distance at the ball's spray angle is a fact
+the fielding engine already computed, and `BaserunningEngine` needs it to
+tell an off-the-wall double from a routine one, so it rides along.
+
+### `BaseRunners.apply()` exists
+
+The document says `BaseRunners` is mutated only by `HalfInning`. That still
+holds — but the *logic* for applying a `BaserunningResult` lives on
+`BaseRunners` as a single method that `HalfInning` calls, rather than being
+open-coded in `HalfInning`. One implementation, and tests can exercise it
+without building a game.
+
+### `SimulationConfig.for_level()` is not implemented
+
+Specified, deliberately absent. Writing it means inventing tee-ball physics
+— what levels exist, and what actually changes at each — which is a design
+decision, not an extraction. `SimulationConfig.mlb()` is the only preset.
+
+### Sacrifice flies are still not scored
+
+`AtBatResult.SAC_FLY` exists and is never produced. A runner tags from third
+on a fly ball and the run scores, but the play is recorded as `FLY_OUT`,
+which wrongly counts it as an official at-bat. This is a v0.1 defect carried
+forward intentionally: fixing it moves batting average, and v0.3 was a
+structural change. It belongs with the double-play work.
+
+### Deliberately not in v0.3, and still absent
+
+Double plays are the one to note. The structure now supports them —
+`Play.outs_recorded` is an `int`, `BaseRunners.force_state()` returns which
+runners are forced — but no code produces a second out on a play. The
+`double_play_base_rate` knob exists in `SimulationConfig` and is unread.
