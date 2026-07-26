@@ -38,6 +38,7 @@ from baseball import (
     Team,
 )
 from baseball.enums import PLATE_HALF_WIDTH_FT, ZONE_BOTTOM_FT, ZONE_TOP_FT
+from baseball.rngs import derive
 
 PITCHING = PitchingEngine()
 BATTING = BattingEngine()
@@ -877,6 +878,71 @@ class TestPlayerIsPersistent(unittest.TestCase):
             shared.state_for(first_pitcher).pitches_thrown,
             first_pitcher.pitching.stamina + 40,
             "pitch count carried across games",
+        )
+
+
+class TestPerPlateAppearanceRNG(unittest.TestCase):
+    """The two properties step 7 exists to provide."""
+
+    def test_streams_are_stable_across_processes(self):
+        """Pinned value. The v0.3 sketch used hash(), which Python
+        randomizes per process for strings -- that silently destroys the
+        same-seed replay this feature is for. A golden value fails loudly
+        if anyone swaps the derivation back."""
+        self.assertAlmostEqual(
+            derive(7, 1, "top", 0, 0).random(), 0.2816287460455701, places=15
+        )
+
+    def test_batting_around_does_not_reuse_a_stream(self):
+        """batter_index alone collides when a team bats around."""
+        first_time = derive(7, 1, "top", 0, 3).random()
+        second_time = derive(7, 1, "top", 9, 3).random()
+        self.assertNotEqual(first_time, second_time)
+
+    def test_tags_separate_decisions_in_one_slot(self):
+        self.assertNotEqual(
+            derive(7, 1, "top", 0, 0, "pa").random(),
+            derive(7, 1, "top", 0, 0, "steal").random(),
+        )
+
+    def test_same_seed_reproduces_exactly(self):
+        def play():
+            away = Team.generate(make_rng(500), "Away")
+            home = Team.generate(make_rng(501), "Home")
+            r = Game.start(home, away, make_rng(3), seed=9090).simulate()
+            return [(p.official_result, p.pitches, p.runs_scored) for p in r.plays]
+
+        self.assertEqual(play(), play())
+
+    def test_a_config_change_perturbs_only_what_it_touches(self):
+        """The point of per-PA streams.
+
+        Under one shared generator, changing any probability shifts the
+        number of draws and reshuffles every later result, so calibration
+        moved even for behaviorally neutral edits.
+        """
+        from dataclasses import replace as replace_config
+
+        from baseball import SimulationConfig
+
+        def play(config):
+            away = Team.generate(make_rng(500), "Away")
+            home = Team.generate(make_rng(501), "Home")
+            r = Game.start(
+                home, away, make_rng(3), config=config, seed=4141
+            ).simulate()
+            return [(p.batter.name, p.official_result) for p in r.plays]
+
+        base = SimulationConfig.mlb()
+        nudged = replace_config(base, hbp_rate=base.hbp_rate * 1.5)
+
+        a, b = play(base), play(nudged)
+        shared = sum(1 for x, y in zip(a, b) if x == y)
+        fraction = shared / max(len(a), len(b))
+        self.assertGreater(
+            fraction,
+            0.5,
+            f"only {fraction:.0%} of plays survived an unrelated knob change",
         )
 
 

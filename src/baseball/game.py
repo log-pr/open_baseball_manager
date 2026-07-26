@@ -22,6 +22,7 @@ from .engines import (
 from .enums import PitchCall
 from .events import BaserunningResult, Play
 from .player import Player
+from .rngs import derive
 from .state import BaseRunners, Situation
 from .team import Team
 
@@ -104,15 +105,29 @@ class HalfInning:
     park: ParkConfig = DEFAULT_PARK
     engines: Optional[Engines] = None
     score_differential: int = 0
+    game_seed: Optional[int] = None
 
     outs: int = 0
     runs: int = 0
     base_runners: BaseRunners = field(default_factory=BaseRunners)
     plays: List[Play] = field(default_factory=list)
+    pa_index: int = 0
 
     def __post_init__(self) -> None:
         if self.engines is None:
             self.engines = Engines.build(self.config, self.park)
+
+    def _rng_for(self, batter_index: int, tag: str) -> random.Random:
+        """The stream for one decision in one plate-appearance slot.
+
+        Falls back to the shared generator when no game seed was given, so
+        a HalfInning can still be built standalone for testing.
+        """
+        if self.game_seed is None:
+            return self.rng
+        return derive(
+            self.game_seed, self.inning, self.half, self.pa_index, batter_index, tag
+        )
 
     def situation(self) -> Situation:
         """An immutable snapshot. Engines cannot mutate the game through it."""
@@ -127,7 +142,9 @@ class HalfInning:
     def play(self, max_runs: Optional[int] = None) -> int:
         """Play until three outs. Returns runs scored."""
         while self.outs < 3:
-            self._attempt_steal()
+            batter_index = self.batting_team.lineup.current_index
+
+            self._attempt_steal(self._rng_for(batter_index, "steal"))
 
             # Go to the bullpen if the current arm is gassed.
             if self.defending_team.needs_relief():
@@ -137,7 +154,12 @@ class HalfInning:
             pitcher = self.defending_team.current_pitcher
             assert pitcher is not None
 
-            self.plays.append(self._plate_appearance(batter, pitcher))
+            self.plays.append(
+                self._plate_appearance(
+                    batter, pitcher, self._rng_for(batter_index, "pa")
+                )
+            )
+            self.pa_index += 1
 
             # Walk-off: stop the moment the home team goes ahead.
             if max_runs is not None and self.runs >= max_runs:
@@ -145,7 +167,9 @@ class HalfInning:
 
         return self.runs
 
-    def _plate_appearance(self, batter: Player, pitcher: Player) -> Play:
+    def _plate_appearance(
+        self, batter: Player, pitcher: Player, rng: random.Random
+    ) -> Play:
         engines = self.engines
         assert engines is not None
         situation = self.situation()
@@ -154,7 +178,7 @@ class HalfInning:
             batter=batter,
             pitcher=pitcher,
             pitcher_state=self.defending_team.state_for(pitcher),
-            rng=self.rng,
+            rng=rng,
             config=self.config,
             pitching_engine=engines.pitching,
             batting_engine=engines.batting,
@@ -165,7 +189,7 @@ class HalfInning:
         if outcome.terminal_call is PitchCall.IN_PLAY:
             assert outcome.batted_ball is not None
             fielding_result = engines.fielding.resolve(
-                outcome.batted_ball, self.defending_team, situation, self.rng
+                outcome.batted_ball, self.defending_team, situation, rng
             )
             baserunning = engines.baserunning.advance(
                 batter,
@@ -173,7 +197,7 @@ class HalfInning:
                 outcome.batted_ball,
                 self.base_runners,
                 self.outs,
-                self.rng,
+                rng,
             )
         elif outcome.terminal_call in (PitchCall.BALL, PitchCall.HIT_BY_PITCH):
             baserunning = engines.baserunning.force_advance(batter, self.base_runners)
@@ -217,10 +241,10 @@ class HalfInning:
 
     # --- Baserunning ------------------------------------------------------
 
-    def _attempt_steal(self) -> None:
+    def _attempt_steal(self, rng: random.Random) -> None:
         assert self.engines is not None
         result = self.engines.baserunning.attempt_steal(
-            self.base_runners, self.defending_team, self.rng
+            self.base_runners, self.defending_team, rng
         )
         if result is not None:
             self._apply(result)
@@ -253,6 +277,7 @@ class Game:
     rng: random.Random = field(default_factory=random.Random)
     config: SimulationConfig = DEFAULT_CONFIG
     park: ParkConfig = DEFAULT_PARK
+    seed: Optional[int] = None
     regulation_innings: int = 9
 
     home_score: int = 0
@@ -280,6 +305,7 @@ class Game:
         rng: Optional[random.Random] = None,
         config: SimulationConfig = DEFAULT_CONFIG,
         park: ParkConfig = DEFAULT_PARK,
+        seed: Optional[int] = None,
     ) -> "Game":
         home.validate()
         away.validate()
@@ -289,12 +315,18 @@ class Game:
                 team.state_for(player).reset()
             if team.starting_pitcher is not None:
                 team.current_pitcher = team.starting_pitcher
+        rng = rng or random.Random()
+        # One draw off the caller's generator becomes the game seed, so
+        # passing the same generator still reproduces the same game.
+        if seed is None:
+            seed = rng.getrandbits(64)
         return cls(
             home_team=home,
             away_team=away,
-            rng=rng or random.Random(),
+            rng=rng,
             config=config,
             park=park,
+            seed=seed,
         )
 
     def simulate(self, verbose: bool = False) -> GameResult:
@@ -329,6 +361,7 @@ class Game:
                 config=self.config,
                 park=self.park,
                 engines=self.engines,
+                game_seed=self.seed,
                 score_differential=(
                     self.away_score - self.home_score
                     if top
