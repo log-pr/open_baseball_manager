@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from .batted_ball import BattedBall
+from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
 from .enums import AtBatResult, PitchCall, SwingOutcome, grade_to_z
 from .pitch import Pitch
 
@@ -32,6 +33,8 @@ class AtBat:
     pitcher: "Player"
     defense: Optional["Team"] = None
     rng: random.Random = field(default_factory=random.Random)
+    config: SimulationConfig = DEFAULT_CONFIG
+    park: ParkConfig = DEFAULT_PARK
 
     balls: int = 0
     strikes: int = 0
@@ -55,45 +58,66 @@ class AtBat:
         Good plate discipline (eye grade) mostly shows up as laying off
         pitches out of the zone rather than swinging more at strikes.
         """
+        cfg = self.config
         eye_z = grade_to_z(self.batter.hitting.eye_grade)
 
         if pitch.in_zone:
-            base = 0.67
+            base = cfg.zone_swing_rate
             # With two strikes he has to protect.
             if self.strikes == 2:
-                base = 0.88
-            return max(0.15, min(0.97, base + eye_z * 0.015))
+                base = cfg.two_strike_zone_swing_rate
+            return max(
+                cfg.zone_swing_min,
+                min(cfg.zone_swing_max, base + eye_z * cfg.zone_swing_eye_weight),
+            )
 
         # Chase rate: better eyes chase less.
-        base = 0.475 - eye_z * 0.055
+        base = cfg.chase_rate_base - eye_z * cfg.eye_grade_weight
         # Pitches just off the plate are more tempting than way outside.
-        nearness = max(0.0, 1.0 - (pitch.distance_from_center - 0.85) / 1.9)
-        base *= max(0.12, nearness)
+        nearness = max(
+            0.0,
+            1.0
+            - (pitch.distance_from_center - cfg.chase_nearness_offset)
+            / cfg.chase_nearness_scale,
+        )
+        base *= max(cfg.chase_nearness_floor, nearness)
         if self.strikes == 2:
-            base += 0.20
-        return max(0.02, min(0.92, base))
+            base += cfg.two_strike_chase_bonus
+        return max(cfg.chase_min, min(cfg.chase_max, base))
 
     def _whiff_probability(self, pitch: Pitch) -> float:
         """How likely a swing misses entirely."""
+        cfg = self.config
         hit_z = grade_to_z(self.batter.hitting.hit_grade)
-        base = 0.170 - hit_z * 0.035
+        base = cfg.whiff_base - hit_z * cfg.whiff_hit_grade_weight
 
         # Velocity, spin, and location all make contact harder.
-        base += (pitch.effective_velocity - 92.0) * 0.0055
-        base += (pitch.spin_rate - 2250) * 0.000022
-        base += max(0.0, pitch.distance_from_center - 0.75) * 0.16
+        base += (
+            pitch.effective_velocity - cfg.whiff_velocity_baseline
+        ) * cfg.whiff_velocity_weight
+        base += (pitch.spin_rate - cfg.whiff_spin_baseline) * cfg.whiff_spin_weight
+        base += (
+            max(0.0, pitch.distance_from_center - cfg.whiff_location_offset)
+            * cfg.whiff_location_weight
+        )
 
         # Longer swings are more susceptible to missing.
-        base += (self.batter.hitting.swing_length - 7.3) * 0.022
+        base += (
+            self.batter.hitting.swing_length - cfg.whiff_swing_length_baseline
+        ) * cfg.whiff_swing_length_weight
 
-        return max(0.03, min(0.85, base))
+        return max(cfg.whiff_min, min(cfg.whiff_max, base))
 
     def _foul_probability(self, pitch: Pitch) -> float:
         """Given contact, how often it goes foul."""
+        cfg = self.config
         hit_z = grade_to_z(self.batter.hitting.hit_grade)
-        base = 0.575 - hit_z * 0.012
-        base += max(0.0, pitch.distance_from_center - 0.75) * 0.10
-        return max(0.15, min(0.70, base))
+        base = cfg.foul_rate_base - hit_z * cfg.foul_hit_grade_weight
+        base += (
+            max(0.0, pitch.distance_from_center - cfg.foul_location_offset)
+            * cfg.foul_location_weight
+        )
+        return max(cfg.foul_min, min(cfg.foul_max, base))
 
     # --- Pitch resolution ------------------------------------------------
 
@@ -102,13 +126,16 @@ class AtBat:
         if self.is_complete:
             raise RuntimeError("at-bat is already complete")
 
-        pitch = Pitch.thrown(self.pitcher, self.rng)
+        pitch = Pitch.thrown(self.pitcher, self.rng, self.config)
         self.pitches.append(pitch)
         self.pitcher.pitches_thrown += 1
 
         # Hit by pitch: only for pitches well inside and off the plate.
-        if not pitch.in_zone and pitch.distance_from_center > 1.5:
-            if self.rng.random() < 0.011:
+        if (
+            not pitch.in_zone
+            and pitch.distance_from_center > self.config.hbp_distance_threshold
+        ):
+            if self.rng.random() < self.config.hbp_rate:
                 return PitchCall.HIT_BY_PITCH, pitch
 
         swings = self.rng.random() < self._swing_probability(pitch)
@@ -133,7 +160,9 @@ class AtBat:
                 self.strikes += 1
             return PitchCall.FOUL, pitch
 
-        self.batted_ball = BattedBall.from_contact(self.batter, pitch, self.rng)
+        self.batted_ball = BattedBall.from_contact(
+            self.batter, pitch, self.rng, self.config
+        )
         return PitchCall.IN_PLAY, pitch
 
     def _resolve_swing(self, pitch: Pitch) -> SwingOutcome:
@@ -158,7 +187,9 @@ class AtBat:
                 if self.defense is None:
                     # No defense supplied: useful for isolated physics tests.
                     return AtBatResult.SINGLE
-                return self.batted_ball.resolve(self.defense, self.rng)
+                return self.batted_ball.resolve(
+                    self.defense, self.rng, self.config, self.park
+                )
 
             if self.balls >= 4:
                 return AtBatResult.WALK

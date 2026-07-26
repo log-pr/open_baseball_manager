@@ -15,6 +15,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from .config import DEFAULT_CONFIG
 from .enums import (
     GRADE_AVG,
     GRADE_MAX,
@@ -259,11 +260,17 @@ class Player:
 
         Capped: a gassed pitcher gets much worse but never becomes
         physically incapable of throwing a strike.
+
+        Reads the module-level default config rather than an injected one,
+        because a property takes no arguments. Migration step 3 moves this
+        onto PlayerGameState, where config can be injected properly.
         """
         if not self.pitching.stamina:
             return 0.0
         over = self.pitches_thrown - self.pitching.stamina
-        return max(0.0, min(2.0, over / 40.0))
+        return max(
+            0.0, min(DEFAULT_CONFIG.fatigue_cap, over / DEFAULT_CONFIG.fatigue_pitches_scale)
+        )
 
     def rest(self) -> None:
         """Reset the in-game pitch count."""

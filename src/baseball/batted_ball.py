@@ -17,6 +17,12 @@ import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
+from .config import (
+    DEFAULT_CONFIG,
+    DEFAULT_PARK,
+    ParkConfig,
+    SimulationConfig,
+)
 from .enums import (
     GRAVITY_FT_S2,
     INFIELD_DEPTH_FT,
@@ -48,9 +54,6 @@ FIELDER_POSITIONS = {
     Position.C: (0.0, 5.0),
 }
 
-# Drag knocks roughly a third off the vacuum range of a batted ball.
-DRAG_FACTOR = 0.63
-
 
 @dataclass
 class BattedBall:
@@ -72,11 +75,12 @@ class BattedBall:
 
     @property
     def wall_distance(self) -> float:
-        """Distance to the fence at this ball's spray angle.
+        """Distance to the fence at this ball's spray angle, default park.
 
-        Roughly 330 feet down the lines, 400 to straightaway center.
+        Convenience for the standard park. `resolve()` uses whichever
+        ParkConfig it was handed instead.
         """
-        return 330.0 + 70.0 * math.cos(math.radians(min(45.0, abs(self.spray_angle)) * 2))
+        return DEFAULT_PARK.wall_distance(self.spray_angle)
 
     @property
     def is_barrel(self) -> bool:
@@ -122,39 +126,58 @@ class BattedBall:
         batter: "Player",
         pitch: "Pitch",
         rng: random.Random,
+        config: SimulationConfig = DEFAULT_CONFIG,
     ) -> "BattedBall":
         """Turn a swing on a pitch into a trajectory."""
         h = batter.hitting
+        cfg = config
 
         # Ball-bat collision. The classic approximation is that exit
         # velocity ceiling scales with bat speed plus a smaller share of the
         # incoming pitch speed.
-        max_ev = 1.23 * h.bat_speed + 0.23 * pitch.velocity
+        max_ev = (
+            cfg.bat_speed_coefficient * h.bat_speed
+            + cfg.pitch_speed_coefficient * pitch.velocity
+        )
 
         # Squared-up rate: the share of that ceiling actually achieved.
         # Good contact hitters square up more often; pitches away from the
         # middle of the zone are harder to square up.
         hit_z = grade_to_z(h.hit_grade)
-        center_penalty = max(0.0, pitch.distance_from_center - 0.6) * 0.055
-        spread = max(0.09, 0.194 - hit_z * 0.010 + center_penalty)
+        center_penalty = (
+            max(0.0, pitch.distance_from_center - cfg.squared_up_location_offset)
+            * cfg.squared_up_location_weight
+        )
+        spread = max(
+            cfg.squared_up_spread_min,
+            cfg.squared_up_spread - hit_z * cfg.squared_up_hit_grade_weight + center_penalty,
+        )
         squared_up = 1.0 - abs(rng.gauss(0, spread))
-        squared_up = max(0.28, min(1.0, squared_up))
+        squared_up = max(cfg.squared_up_min, min(1.0, squared_up))
 
-        exit_velocity = max(28.0, max_ev * squared_up)
+        exit_velocity = max(cfg.exit_velocity_min, max_ev * squared_up)
 
         # Launch angle keys off the swing plane, adjusted for pitch height
         # (low pitches get hit at a steeper angle) plus per-swing noise.
-        height_adjust = (2.5 - pitch.z) * 6.0
-        launch_angle = h.attack_angle + height_adjust + rng.gauss(3.8, 22.0)
-        launch_angle = max(-70.0, min(85.0, launch_angle))
+        height_adjust = (cfg.launch_height_baseline - pitch.z) * cfg.launch_height_weight
+        launch_angle = (
+            h.attack_angle
+            + height_adjust
+            + rng.gauss(cfg.launch_angle_offset, cfg.launch_angle_sigma)
+        )
+        launch_angle = max(cfg.launch_angle_min, min(cfg.launch_angle_max, launch_angle))
 
         # Spray angle follows pull tendency, with inside pitches pulled more.
-        pull_bias = h.pull_tendency * 18.0
-        inside_effect = -pitch.x * 8.0 if batter.bats == "R" else pitch.x * 8.0
-        spray_angle = pull_bias + inside_effect + rng.gauss(0, 15.0)
-        spray_angle = max(-45.0, min(45.0, spray_angle))
+        pull_bias = h.pull_tendency * cfg.pull_weight
+        inside_effect = (
+            -pitch.x * cfg.spray_inside_weight
+            if batter.bats == "R"
+            else pitch.x * cfg.spray_inside_weight
+        )
+        spray_angle = pull_bias + inside_effect + rng.gauss(0, cfg.spray_sigma)
+        spray_angle = max(-cfg.spray_max, min(cfg.spray_max, spray_angle))
 
-        distance, hang_time = cls._trajectory(exit_velocity, launch_angle)
+        distance, hang_time = cls._trajectory(exit_velocity, launch_angle, cfg)
 
         return cls(
             exit_velocity=round(exit_velocity, 1),
@@ -165,17 +188,26 @@ class BattedBall:
         )
 
     @staticmethod
-    def _trajectory(exit_velocity: float, launch_angle: float) -> Tuple[float, float]:
+    def _trajectory(
+        exit_velocity: float,
+        launch_angle: float,
+        config: SimulationConfig = DEFAULT_CONFIG,
+    ) -> Tuple[float, float]:
         """Projectile motion with a flat drag correction.
 
         Full aerodynamics (spin-dependent lift, altitude, air density) is
         overkill here. This is tuned so the exit velocity / launch angle /
         distance combinations land in realistic territory.
         """
+        cfg = config
+
         if launch_angle <= 0:
             # Grounder: it skips along the ground rather than flying.
             speed = exit_velocity * MPH_TO_FPS
-            distance = max(5.0, speed * 0.55 * (1.0 + launch_angle / 60.0))
+            distance = max(
+                cfg.ground_distance_min,
+                speed * cfg.ground_roll_factor * (1.0 + launch_angle / cfg.ground_angle_scale),
+            )
             return distance, 0.0
 
         v = exit_velocity * MPH_TO_FPS
@@ -184,13 +216,16 @@ class BattedBall:
         # Steeper launch angles mean a longer, higher flight, and drag has
         # more time to bleed off distance. A flat drag factor overstates
         # towering fly balls badly, so it scales with launch angle.
-        drag = DRAG_FACTOR - max(0.0, launch_angle - 25.0) * 0.0032
-        drag = max(0.32, drag)
+        drag = (
+            cfg.drag_factor
+            - max(0.0, launch_angle - cfg.drag_angle_threshold) * cfg.drag_angle_penalty
+        )
+        drag = max(cfg.drag_factor_min, drag)
 
         vacuum_range = (v**2) * math.sin(2 * theta) / GRAVITY_FT_S2
-        distance = max(3.0, vacuum_range * drag)
+        distance = max(cfg.air_distance_min, vacuum_range * drag)
 
-        hang_time = 2.0 * v * math.sin(theta) / GRAVITY_FT_S2 * 1.12
+        hang_time = 2.0 * v * math.sin(theta) / GRAVITY_FT_S2 * cfg.hang_time_factor
         return distance, max(0.0, hang_time)
 
     # --- Fielding -------------------------------------------------------
@@ -220,14 +255,25 @@ class BattedBall:
                 best, best_dist = player, dist
         return best, best_dist
 
-    def resolve(self, defense: "Team", rng: random.Random) -> AtBatResult:
+    def resolve(
+        self,
+        defense: "Team",
+        rng: random.Random,
+        config: SimulationConfig = DEFAULT_CONFIG,
+        park: ParkConfig = DEFAULT_PARK,
+    ) -> AtBatResult:
         """Decide what this batted ball actually becomes."""
+        wall = park.wall_distance(self.spray_angle)
+
         # Out of the park. The fence is closer down the lines than in center.
-        if self.distance >= self.wall_distance and 15 <= self.launch_angle <= 50:
+        if (
+            self.distance >= wall
+            and config.home_run_min_angle <= self.launch_angle <= config.home_run_max_angle
+        ):
             return AtBatResult.HOME_RUN
 
         # Foul out of play.
-        if abs(self.spray_angle) > 45:
+        if abs(self.spray_angle) > config.spray_max:
             return AtBatResult.FLY_OUT
 
         fielder, gap = self._fielder_gap(defense)
@@ -237,10 +283,12 @@ class BattedBall:
         ball_type = self.batted_ball_type
 
         if ball_type == "ground ball":
-            return self._resolve_ground_ball(defense, rng)
-        return self._resolve_air_ball(fielder, gap, ball_type, rng)
+            return self._resolve_ground_ball(defense, rng, config)
+        return self._resolve_air_ball(fielder, gap, ball_type, rng, config, wall)
 
-    def _ground_ball_fielder(self, defense: "Team") -> Tuple[Optional["Player"], float, float]:
+    def _ground_ball_fielder(
+        self, defense: "Team", config: SimulationConfig = DEFAULT_CONFIG
+    ) -> Tuple[Optional["Player"], float, float]:
         """Ground balls roll, so they get fielded along their path.
 
         Using a landing point here would be wrong: a grounder first touches
@@ -265,57 +313,89 @@ class BattedBall:
 
         # How long the ball takes to travel out to the infielders. Friction
         # and the bounce bleed off a good chunk of the exit velocity.
-        horizontal = max(20.0, self.exit_velocity * MPH_TO_FPS * 0.70)
+        horizontal = max(
+            config.ground_ball_speed_min,
+            self.exit_velocity * MPH_TO_FPS * config.ground_ball_speed_retention,
+        )
         travel_time = INFIELD_DEPTH_FT / horizontal
         return best, best_dist, travel_time
 
     def _resolve_ground_ball(
-        self, defense: "Team", rng: random.Random
+        self,
+        defense: "Team",
+        rng: random.Random,
+        config: SimulationConfig = DEFAULT_CONFIG,
     ) -> AtBatResult:
-        fielder, gap, travel_time = self._ground_ball_fielder(defense)
+        cfg = config
+        fielder, gap, travel_time = self._ground_ball_fielder(defense, cfg)
         if fielder is None:
             return AtBatResult.SINGLE
 
         # Reaction eats into the time available; lateral movement on a
         # grounder is slower than an open-field sprint.
-        react = 0.34 - grade_to_z(fielder.fielding.field_grade) * 0.035
+        react = (
+            cfg.infield_reaction_time
+            - grade_to_z(fielder.fielding.field_grade) * cfg.infield_reaction_grade_weight
+        )
         usable = max(0.0, travel_time - react)
-        reach = usable * fielder.running.sprint_speed * 0.674
+        reach = usable * fielder.running.sprint_speed * cfg.infield_reach_factor
 
         if gap > reach:
-            double_chance = 0.16 if abs(self.spray_angle) > 30 else 0.04
+            double_chance = (
+                cfg.ground_double_corner_rate
+                if abs(self.spray_angle) > cfg.corner_spray_angle
+                else cfg.ground_double_base_rate
+            )
             return AtBatResult.DOUBLE if rng.random() < double_chance else AtBatResult.SINGLE
 
         if rng.random() < fielder.fielding.error_rate:
             return AtBatResult.ERROR
 
         # Fielded cleanly, but a fast runner can still beat the throw.
-        speed_z = (self.exit_velocity - 80.0) / 25.0
-        infield_hit = max(0.01, 0.055 - speed_z * 0.02)
+        speed_z = (
+            self.exit_velocity - cfg.infield_hit_velocity_baseline
+        ) / cfg.infield_hit_velocity_scale
+        infield_hit = max(
+            cfg.infield_hit_min,
+            cfg.infield_hit_base - speed_z * cfg.infield_hit_velocity_weight,
+        )
         if rng.random() < infield_hit:
             return AtBatResult.SINGLE
         return AtBatResult.GROUND_OUT
 
     def _resolve_air_ball(
-        self, fielder: "Player", gap: float, ball_type: str, rng: random.Random
+        self,
+        fielder: "Player",
+        gap: float,
+        ball_type: str,
+        rng: random.Random,
+        config: SimulationConfig = DEFAULT_CONFIG,
+        wall: Optional[float] = None,
     ) -> AtBatResult:
+        cfg = config
+        if wall is None:
+            wall = self.wall_distance
+
         # How far the fielder can travel while the ball is in the air.
         # Real fielders lose about half a second to reaction before moving.
-        react = 0.55 - grade_to_z(fielder.fielding.field_grade) * 0.06
+        react = (
+            cfg.reaction_time_base
+            - grade_to_z(fielder.fielding.field_grade) * cfg.outfield_reaction_grade_weight
+        )
         usable = max(0.0, self.hang_time - react)
-        range_ft = usable * fielder.running.sprint_speed * 0.874
+        range_ft = usable * fielder.running.sprint_speed * cfg.outfield_reach_factor
 
         if range_ft <= 0:
             catchable = False
         else:
             # Smooth catch probability instead of a hard cutoff, so close
             # plays go either way.
-            margin = (range_ft - gap) / 9.0
+            margin = (range_ft - gap) / cfg.catch_probability_slope
             catch_prob = 1.0 / (1.0 + math.exp(-margin))
             catchable = rng.random() < catch_prob
 
         if catchable:
-            if rng.random() < fielder.fielding.error_rate * 0.6:
+            if rng.random() < fielder.fielding.error_rate * cfg.air_error_multiplier:
                 return AtBatResult.ERROR
             if ball_type == "line drive":
                 return AtBatResult.LINE_OUT
@@ -326,17 +406,27 @@ class BattedBall:
         # It dropped. How far it landed, and how close to the line, decides
         # how many bases. Balls down the line and into the gaps take longer
         # to run down than balls hit right at somebody.
-        corner_bonus = 0.18 if abs(self.spray_angle) > 30 else 0.0
+        corner_bonus = (
+            cfg.corner_bonus if abs(self.spray_angle) > cfg.corner_spray_angle else 0.0
+        )
 
-        if self.distance >= self.wall_distance - 25:
-            return AtBatResult.TRIPLE if rng.random() < 0.22 else AtBatResult.DOUBLE
-        if self.distance >= 250:
+        if self.distance >= wall - cfg.wall_margin:
+            return (
+                AtBatResult.TRIPLE
+                if rng.random() < cfg.off_wall_triple_rate
+                else AtBatResult.DOUBLE
+            )
+        if self.distance >= cfg.deep_distance:
             roll = rng.random()
-            if roll < 0.07 + corner_bonus * 0.3:
+            if roll < cfg.deep_triple_rate + corner_bonus * cfg.deep_triple_corner_weight:
                 return AtBatResult.TRIPLE
-            if roll < 0.84 + corner_bonus:
+            if roll < cfg.deep_double_rate + corner_bonus:
                 return AtBatResult.DOUBLE
             return AtBatResult.SINGLE
-        if self.distance >= 170:
-            return AtBatResult.DOUBLE if rng.random() < 0.38 + corner_bonus else AtBatResult.SINGLE
+        if self.distance >= cfg.medium_distance:
+            return (
+                AtBatResult.DOUBLE
+                if rng.random() < cfg.medium_double_rate + corner_bonus
+                else AtBatResult.SINGLE
+            )
         return AtBatResult.SINGLE

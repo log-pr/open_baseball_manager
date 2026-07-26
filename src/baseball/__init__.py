@@ -1,5 +1,6 @@
 """A pitch-by-pitch baseball simulation engine."""
 
+from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
 from .enums import AtBatResult, PitchCall, PitchType, Position, SwingOutcome
 from .player import (
     FieldingProfile,
@@ -16,6 +17,7 @@ from .team import BaseRunners, PlayerStats, Team
 from .game import Game, GameResult, HalfInning, PlayEvent
 
 __all__ = [
+    "SimulationConfig", "ParkConfig", "DEFAULT_CONFIG", "DEFAULT_PARK",
     "AtBatResult", "PitchCall", "PitchType", "Position", "SwingOutcome",
     "Player", "HittingProfile", "PitchingProfile", "FieldingProfile",
     "RunningProfile", "PitchArsenalEntry",

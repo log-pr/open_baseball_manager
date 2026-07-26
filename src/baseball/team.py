@@ -11,6 +11,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .config import DEFAULT_CONFIG, SimulationConfig
 from .enums import AtBatResult, Position
 from .player import Player
 
@@ -138,6 +139,7 @@ class BaseRunners:
         bases: int,
         batter: Optional[Player] = None,
         rng: Optional[random.Random] = None,
+        config: SimulationConfig = DEFAULT_CONFIG,
     ) -> List[Player]:
         """Move runners up on a hit, returning those who scored.
 
@@ -159,16 +161,21 @@ class BaseRunners:
 
             # Chance at one extra base, weighted by the runner's speed.
             if bases < 4 and new_base < 4:
-                speed_edge = (runner.running.sprint_speed - 27.0) * 0.06
+                speed_edge = (
+                    runner.running.sprint_speed - config.baserunning_speed_baseline
+                ) * config.speed_weight
                 if base == 2 and bases == 1:
-                    extra = 0.58 + speed_edge  # second scores on a single
+                    # Second scores on a single.
+                    extra = config.score_from_second_on_single + speed_edge
                 elif base == 1 and bases == 1:
-                    extra = 0.30 + speed_edge  # first to third on a single
+                    # First to third on a single.
+                    extra = config.first_to_third_on_single + speed_edge
                 elif base == 1 and bases == 2:
-                    extra = 0.45 + speed_edge  # first scores on a double
+                    # First scores on a double.
+                    extra = config.score_from_first_on_double + speed_edge
                 else:
-                    extra = 0.20 + speed_edge
-                if rng.random() < max(0.0, min(0.95, extra)):
+                    extra = config.extra_base_default + speed_edge
+                if rng.random() < max(0.0, min(config.extra_base_max, extra)):
                     new_base += 1
 
             if new_base >= 4:

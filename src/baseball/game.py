@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from .at_bat import AtBat
+from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
 from .enums import AtBatResult, grade_to_z
 from .player import Player
 from .team import BaseRunners, Team
@@ -69,6 +70,8 @@ class HalfInning:
     rng: random.Random
     inning: int = 1
     half: str = "top"
+    config: SimulationConfig = DEFAULT_CONFIG
+    park: ParkConfig = DEFAULT_PARK
 
     outs: int = 0
     runs: int = 0
@@ -94,6 +97,8 @@ class HalfInning:
                 pitcher=pitcher,
                 defense=self.defending_team,
                 rng=self.rng,
+                config=self.config,
+                park=self.park,
             )
             result = at_bat.simulate()
             runs_on_play = self._apply_result(batter, result)
@@ -133,11 +138,13 @@ class HalfInning:
             self.outs += 1
 
         elif result.is_hit:
-            scored = self.baserunners.advance_all(result.bases, batter, self.rng)
+            scored = self.baserunners.advance_all(
+                result.bases, batter, self.rng, self.config
+            )
             self._score(scored, batter)
 
         elif result is AtBatResult.ERROR:
-            scored = self.baserunners.advance_all(1, batter, self.rng)
+            scored = self.baserunners.advance_all(1, batter, self.rng, self.config)
             self._score(scored, batter)
 
         elif result is AtBatResult.SAC_FLY:
@@ -151,7 +158,7 @@ class HalfInning:
             # A runner on third usually scores on an infield out with
             # fewer than two outs.
             if self.outs < 3 and self.baserunners.third is not None:
-                if self.rng.random() < 0.55:
+                if self.rng.random() < self.config.score_from_third_on_ground_out:
                     self._score([self.baserunners.third], batter)
                     self.baserunners.third = None
 
@@ -162,7 +169,7 @@ class HalfInning:
                 result is AtBatResult.FLY_OUT
                 and self.outs < 3
                 and self.baserunners.third is not None
-                and self.rng.random() < 0.50
+                and self.rng.random() < self.config.tag_from_third_rate
             ):
                 self._score([self.baserunners.third], batter)
                 self.baserunners.third = None
@@ -207,7 +214,10 @@ class HalfInning:
                 catcher_arm = player.fielding.arm_grade
                 break
 
-        success = runner.running.steal_success_rate - grade_to_z(catcher_arm) * 0.04
+        success = (
+            runner.running.steal_success_rate
+            - grade_to_z(catcher_arm) * self.config.steal_catcher_arm_weight
+        )
         if self.rng.random() < success:
             self.baserunners.first = None
             self.baserunners.second = runner
@@ -242,6 +252,8 @@ class Game:
     home_team: Team
     away_team: Team
     rng: random.Random = field(default_factory=random.Random)
+    config: SimulationConfig = DEFAULT_CONFIG
+    park: ParkConfig = DEFAULT_PARK
     regulation_innings: int = 9
 
     home_score: int = 0
@@ -258,7 +270,12 @@ class Game:
 
     @classmethod
     def start(
-        cls, home: Team, away: Team, rng: Optional[random.Random] = None
+        cls,
+        home: Team,
+        away: Team,
+        rng: Optional[random.Random] = None,
+        config: SimulationConfig = DEFAULT_CONFIG,
+        park: ParkConfig = DEFAULT_PARK,
     ) -> "Game":
         home.validate()
         away.validate()
@@ -268,7 +285,13 @@ class Game:
                 player.rest()
             if team.starting_pitcher is not None:
                 team.current_pitcher = team.starting_pitcher
-        return cls(home_team=home, away_team=away, rng=rng or random.Random())
+        return cls(
+            home_team=home,
+            away_team=away,
+            rng=rng or random.Random(),
+            config=config,
+            park=park,
+        )
 
     def simulate(self, verbose: bool = False) -> GameResult:
         """Play to completion, including extra innings if tied."""
@@ -299,6 +322,8 @@ class Game:
                 rng=self.rng,
                 inning=inning,
                 half="top" if top else "bottom",
+                config=self.config,
+                park=self.park,
             )
             runs = half.play(max_runs=max_runs)
             play_by_play.extend(half.events)
