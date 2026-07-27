@@ -62,6 +62,8 @@ class GameResult:
     away_score: int
     innings_played: int
     plays: List[Play] = field(default_factory=list)
+    home_left_on_base: int = 0
+    away_left_on_base: int = 0
 
     @property
     def winner(self) -> Optional[Team]:
@@ -112,6 +114,7 @@ class HalfInning:
     base_runners: BaseRunners = field(default_factory=BaseRunners)
     plays: List[Play] = field(default_factory=list)
     pa_index: int = 0
+    left_on_base: int = 0
 
     def __post_init__(self) -> None:
         if self.engines is None:
@@ -165,6 +168,9 @@ class HalfInning:
             if max_runs is not None and self.runs >= max_runs:
                 break
 
+        # Runners stranded when the half ended. The diagnostic that tells
+        # "not enough contact" apart from "not enough advancement".
+        self.left_on_base = self.base_runners.count
         return self.runs
 
     def _plate_appearance(
@@ -246,8 +252,17 @@ class HalfInning:
         result = self.engines.baserunning.attempt_steal(
             self.base_runners, self.defending_team, rng
         )
-        if result is not None:
-            self._apply(result)
+        if result is None:
+            return
+        # Record the attempt. Steals happened in v0.3 but were written
+        # nowhere, so the rate was unmeasurable.
+        for advancement in result.advancements:
+            stats = self.batting_team.stats_for(advancement.runner)
+            if advancement.out:
+                stats.caught_stealing += 1
+            else:
+                stats.stolen_bases += 1
+        self._apply(result)
 
     # --- Description ------------------------------------------------------
 
@@ -332,6 +347,7 @@ class Game:
     def simulate(self, verbose: bool = False) -> GameResult:
         """Play to completion, including extra innings if tied."""
         plays: List[Play] = []
+        home_lob = away_lob = 0
 
         while True:
             inning = self.inning
@@ -370,6 +386,10 @@ class Game:
             )
             runs = half.play(max_runs=max_runs)
             plays.extend(half.plays)
+            if top:
+                away_lob += half.left_on_base
+            else:
+                home_lob += half.left_on_base
 
             if verbose:
                 side = "Top" if top else "Bottom"
@@ -404,4 +424,6 @@ class Game:
             away_score=self.away_score,
             innings_played=self.inning_counter // 2 + (self.inning_counter % 2),
             plays=plays,
+            home_left_on_base=home_lob,
+            away_left_on_base=away_lob,
         )

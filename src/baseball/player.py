@@ -265,6 +265,18 @@ class PlayerStats:
     assists: int = 0
     errors: int = 0
 
+    # v0.4 counters. Several stay at zero until the mechanic that produces
+    # them lands; the benchmark row goes in first so there is a way to tell
+    # whether the new code produces a realistic rate.
+    sac_flies: int = 0
+    sac_hits: int = 0
+    gidp: int = 0
+    stolen_bases: int = 0
+    caught_stealing: int = 0
+    unearned_runs: int = 0
+    wild_pitches: int = 0
+    passed_balls: int = 0
+
     @property
     def batting_average(self) -> float:
         return self.hits / self.at_bats if self.at_bats else 0.0
