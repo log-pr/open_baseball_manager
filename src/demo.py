@@ -1,8 +1,8 @@
 """Demo CLI for poking at the simulation at every level.
 
 Usage:
-    python3 demo.py pitch            one pitch at a time, with the count
-    python3 demo.py atbat            a single plate appearance, pitch by pitch
+    python3 demo.py pitch            a single pitch, broken down
+    python3 demo.py atbat            one plate appearance, pitch by pitch
     python3 demo.py contact          batted ball physics on 15 swings
     python3 demo.py inning           one half-inning
     python3 demo.py game             a full game with play-by-play
@@ -22,6 +22,7 @@ from baseball import (
     BattingEngine,
     Game,
     HalfInning,
+    PitchCall,
     PitchingEngine,
     Player,
     PlayerGameState,
@@ -36,50 +37,84 @@ def header(text):
 
 
 def demo_pitch(rng):
+    """Exactly one pitch, broken down. The smallest unit in the simulation."""
     header("SINGLE PITCH -- the smallest unit of the simulation")
     pitcher = Player.generate(rng, "Dave Rodriguez", Position.SP)
+    batter = Player.generate(rng, "Marcus Webb", Position.CF)
+    print(f"\n{pitcher.scouting_report()}\n")
+
+    pitch = PitchingEngine().throw_pitch(
+        pitcher, PlayerGameState(player=pitcher), batter, Situation(), rng
+    )
+    aimed_x, aimed_z = pitch.intended_location
+
+    for label, value in (
+        ("Type", str(pitch.pitch_type)),
+        ("Velocity", f"{pitch.velocity:.1f} mph"),
+        (
+            "Effective velo",
+            f"{pitch.effective_velocity:.1f} mph "
+            f"(off {pitcher.pitching.extension} ft of extension)",
+        ),
+        ("Spin", f"{pitch.spin_rate:.0f} rpm"),
+        ("Aimed at", f"({aimed_x:>5.2f}, {aimed_z:>4.2f}) ft"),
+        ("Crossed at", f"({pitch.x:>5.2f}, {pitch.z:>4.2f}) ft"),
+        ("Missed spot by", f"{pitch.miss_distance:.2f} ft"),
+        ("In strike zone", "yes" if pitch.in_zone else "no"),
+    ):
+        print(f"  {label:<15} {value}")
+
+    print(
+        f"\n  Control {pitcher.pitching.control_grade} decided whether he aimed at the "
+        f"zone at all.\n"
+        f"  Command {pitcher.pitching.command_grade} decided how close he landed to "
+        f"the spot he picked.\n"
+        f"  They are separate grades because they fail differently."
+    )
+
+
+def demo_at_bat(rng):
+    """One complete plate appearance, pitch by pitch."""
+    header("FULL AT-BAT -- pitches until the plate appearance resolves")
+    defense = Team.generate(rng, "Fielders")
+    pitcher = defense.starting_pitcher
     batter = Player.generate(rng, "Marcus Webb", Position.CF)
 
     print(f"\n{pitcher.scouting_report()}\n")
     print(f"{batter.scouting_report()}\n")
 
-    at_bat = AtBat(batter=batter, pitcher=pitcher, rng=rng)
+    at_bat = AtBat(
+        batter=batter,
+        pitcher=pitcher,
+        pitcher_state=PlayerGameState(player=pitcher),
+        rng=rng,
+    )
     print(f"{'#':>3}  {'Pitch':<22} {'Velo':>6} {'Spin':>6} {'Loc (x,z)':>14} {'Zone':>6}  Result")
     print("-" * 78)
-    n = 0
-    while not at_bat.is_complete and n < 12:
-        n += 1
+
+    call = None
+    while not at_bat.is_complete:
         call, pitch = at_bat.throw_next_pitch()
         zone = "yes" if pitch.in_zone else "no"
         print(
-            f"{n:>3}  {str(pitch.pitch_type):<22} {pitch.velocity:>6.1f} "
+            f"{len(at_bat.pitches):>3}  {str(pitch.pitch_type):<22} {pitch.velocity:>6.1f} "
             f"{pitch.spin_rate:>6.0f} {str(pitch.actual_location):>14} {zone:>6}  "
             f"{call.name}  ({at_bat.count})"
         )
-        if call.name == "IN_PLAY":
+        if call is PitchCall.IN_PLAY:
             print(f"     -> {at_bat.batted_ball}")
             break
 
-
-def demo_at_bat(rng):
-    header("FULL AT-BAT")
-    defense = Team.generate(rng, "Fielders")
-    pitcher = defense.starting_pitcher
-    batter = Player.generate(rng, "Marcus Webb", Position.CF)
-
-    for i in range(5):
-        state = PlayerGameState(player=pitcher)
-        at_bat = AtBat(
-            batter=batter, pitcher=pitcher, pitcher_state=state, rng=rng
-        )
-        outcome = at_bat.simulate()
-        detail = f"  |  {at_bat.batted_ball}" if at_bat.batted_ball else ""
-        print(
-            f"\nPA {i + 1}: {outcome.terminal_call.name} on {outcome.pitches} pitches "
-            f"(final count {at_bat.count}){detail}"
-        )
-        for pitch in at_bat.pitches:
-            print(f"    {pitch}")
+    print(
+        f"\n  {call.name} on {len(at_bat.pitches)} pitches "
+        f"(final count {at_bat.count})."
+    )
+    print(
+        "  What the ball in play becomes is not decided here -- an at-bat\n"
+        "  cannot know the base state. See `inning`."
+        if call is PitchCall.IN_PLAY
+        else "  Resolved without a ball in play."
+    )
 
 
 def demo_contact(rng):

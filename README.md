@@ -12,8 +12,8 @@ layer is trustworthy.
 ```bash
 python3 demo.py game          # full game with play-by-play
 python3 demo.py boxscore      # full game, box score only
-python3 demo.py pitch         # one pitch at a time
-python3 demo.py atbat         # a plate appearance, pitch by pitch
+python3 demo.py pitch         # a single pitch, broken down
+python3 demo.py atbat         # one plate appearance, pitch by pitch
 python3 demo.py contact       # batted ball physics on 15 swings
 python3 demo.py inning        # one half-inning
 python3 demo.py scout         # 20-80 scouting reports for a team
