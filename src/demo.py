@@ -117,14 +117,19 @@ def demo_inning(rng):
     print(f"\n{runs} run(s) scored.")
 
 
-def demo_game(rng, verbose=True):
-    header("FULL GAME")
+def demo_game(rng, verbose=True, title="FULL GAME"):
+    header(title)
     away = Team.generate(rng, "Ravens")
     home = Team.generate(rng, "Hawks")
     result = Game.start(home, away, rng).simulate(verbose=verbose)
     print(f"\n{'=' * 68}\nFINAL: {result.line_score()}")
     print(f"Winner: {result.winner.name}\n")
     box_score(result)
+
+
+def demo_boxscore(rng):
+    """The same game as `game`, without the pitch-by-pitch narration."""
+    demo_game(rng, verbose=False, title="BOX SCORE")
 
 
 def box_score(result):
@@ -173,13 +178,19 @@ def demo_series(rng, n=100):
     print(f"  Runs allowed: {runs_against / n:.2f} per game")
 
 
+# command -> (handler, how many positional args come before the seed).
+# The arity is what `series` needs: every other command takes the seed
+# immediately, so a bare {name: handler} table couldn't express it and the
+# odd ones out had to be special-cased ahead of the dispatch.
 COMMANDS = {
-    "pitch": demo_pitch,
-    "atbat": demo_at_bat,
-    "contact": demo_contact,
-    "inning": demo_inning,
-    "game": demo_game,
-    "scout": demo_scout,
+    "pitch": (demo_pitch, 0),
+    "atbat": (demo_at_bat, 0),
+    "contact": (demo_contact, 0),
+    "inning": (demo_inning, 0),
+    "game": (demo_game, 0),
+    "boxscore": (demo_boxscore, 0),
+    "scout": (demo_scout, 0),
+    "series": (demo_series, 1),
 }
 
 
@@ -187,29 +198,15 @@ def main():
     args = sys.argv[1:]
     command = args[0] if args else "game"
 
-    if command == "series":
-        n = int(args[1]) if len(args) > 1 else 100
-        seed = int(args[2]) if len(args) > 2 else None
-        demo_series(random.Random(seed), n)
-        return
-
-    seed = int(args[1]) if len(args) > 1 else None
-    rng = random.Random(seed)
-
-    if command == "boxscore":
-        away = Team.generate(rng, "Ravens")
-        home = Team.generate(rng, "Hawks")
-        result = Game.start(home, away, rng).simulate(verbose=False)
-        header("BOX SCORE")
-        print(f"\nFINAL: {result.line_score()}")
-        box_score(result)
-        return
-
-    handler = COMMANDS.get(command)
-    if handler is None:
+    entry = COMMANDS.get(command)
+    if entry is None:
         print(__doc__)
         sys.exit(1)
-    handler(rng)
+
+    handler, arity = entry
+    extra = [int(a) for a in args[1 : 1 + arity]]
+    seed = int(args[1 + arity]) if len(args) > 1 + arity else None
+    handler(random.Random(seed), *extra)
 
 
 if __name__ == "__main__":
