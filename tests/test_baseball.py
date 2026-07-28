@@ -150,7 +150,7 @@ class TestPitch(unittest.TestCase):
             throw(fresh, rng, state).velocity for _ in range(400)
         )
 
-        state.pitches_thrown = 160  # well past his stamina
+        state.fatigue_load = 160  # well past his stamina
         tired_velo = statistics.mean(
             throw(fresh, rng, state).velocity for _ in range(400)
         )
@@ -162,7 +162,7 @@ class TestPitch(unittest.TestCase):
         self.assertFalse(hasattr(arm, "pitches_thrown"))
         a, b = PlayerGameState(player=arm), PlayerGameState(player=arm)
         a.record_pitch()
-        self.assertEqual(b.pitches_thrown, 0, "two games shared one pitch count")
+        self.assertEqual(b.game_pitches_thrown, 0, "two games shared one pitch count")
 
 
 # ---------------------------------------------------------------------------
@@ -869,13 +869,13 @@ class TestPlayerIsPersistent(unittest.TestCase):
 
         Game.start(shared, other_a, make_rng(1)).simulate()
         first_pitcher = shared.starting_pitcher
-        carried = shared.state_for(first_pitcher).pitches_thrown
+        carried = shared.state_for(first_pitcher).game_pitches_thrown
 
         Game.start(shared, other_b, make_rng(1)).simulate()
         self.assertGreater(carried, 0, "no pitches were thrown to check")
         # Game.start resets per-game state, so fatigue cannot snowball.
         self.assertLessEqual(
-            shared.state_for(first_pitcher).pitches_thrown,
+            shared.state_for(first_pitcher).game_pitches_thrown,
             first_pitcher.pitching.stamina + 40,
             "pitch count carried across games",
         )

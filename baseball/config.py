@@ -54,6 +54,39 @@ class ParkConfig:
 
 
 @dataclass(frozen=True)
+class RosterConfig:
+    """Roster shape for one league. Every roster number reads from here.
+
+    Game-day availability derives from these: with the defaults, 13 position
+    players (9 in the lineup, 4 on the bench), one starting pitcher, and 8
+    relievers. The other four rotation members are unavailable today.
+    """
+
+    active_roster_size: int = 26
+    max_pitchers: int = 13
+    rotation_size: int = 5
+    lineup_size: int = 9
+    min_bench: int = 4
+    use_dh: bool = True
+
+    def relievers_available(self) -> int:
+        """Pitchers who can appear today: everyone but the rotation."""
+        return self.max_pitchers - self.rotation_size
+
+    def bench_size(self) -> int:
+        return self.active_roster_size - self.max_pitchers - self.lineup_size
+
+    def validate(self) -> None:
+        if self.bench_size() < self.min_bench:
+            raise ValueError(
+                f"bench of {self.bench_size()} is below min_bench "
+                f"{self.min_bench}; widen the roster or carry fewer pitchers"
+            )
+        if self.relievers_available() < 1:
+            raise ValueError("no relievers available: rotation fills the staff")
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     """The tuning knobs. `SimulationConfig.mlb()` is the calibrated default."""
 
@@ -236,6 +269,26 @@ class SimulationConfig:
 
     # --- Baserunning: steals -----------------------------------------------
     steal_catcher_arm_weight: float = 0.04
+
+    # --- Bullpen warmth (v0.4) ----------------------------------------------
+    # One slot, one continuous counter. States are derived from `warmth`
+    # rather than stored, which handles the awkward cases for free: a
+    # reliever pulled from the slot at 22 and returned three pitches later
+    # resumes at 19, with no re-entry rule needed.
+    bullpen_slots: int = 1
+    pitches_to_warm: int = 30
+    # Separate from pitches_to_warm on purpose. Cooling slower than warming
+    # is more realistic and worth trying during calibration.
+    pitches_to_cool: int = 30
+    # Warm-up throws feed the existing fatigue model at a discount. This is
+    # what makes repeat warm-ups costly without a second counter.
+    warmup_fatigue_ratio: float = 0.5
+    # Cold-entry penalties, scaled continuously by how unready he was.
+    cold_entry_max_control_penalty: int = 8
+    cold_entry_max_command_penalty: int = 8
+    cold_entry_max_velocity_penalty: float = 1.5
+
+    mound_visits_per_game: int = 5
 
     # --- Not yet implemented ------------------------------------------------
     # Double plays. The structure supports them (BaserunningEngine owns force

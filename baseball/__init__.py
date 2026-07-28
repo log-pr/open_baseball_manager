@@ -1,9 +1,20 @@
 """A pitch-by-pitch baseball simulation engine."""
 
-from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
+from .config import (
+    DEFAULT_CONFIG,
+    DEFAULT_PARK,
+    ParkConfig,
+    RosterConfig,
+    SimulationConfig,
+)
 from .enums import (
+    Approach,
     AtBatResult,
+    DecisionBoundary,
+    DecisionKind,
+    DefensiveAlignment,
     FieldingOutcome,
+    OutfieldDepth,
     PitchCall,
     PitchType,
     Position,
@@ -18,7 +29,24 @@ from .player import (
     PlayerStats,
     RunningProfile,
 )
-from .state import BaseRunners, ForceState, Lineup, PlayerGameState, Situation
+from .state import (
+    BaseRunners,
+    BullpenSlot,
+    ForceState,
+    GameRoster,
+    Lineup,
+    PlayerGameState,
+    Situation,
+)
+from .decisions import (
+    BullpenView,
+    Decision,
+    DecisionContext,
+    DecisionLog,
+    DecisionRecord,
+    Option,
+)
+from .agents import AIManager, ManagerAgent, RandomManager, ScriptedManager
 from .pitch import Pitch
 from .batted_ball import BattedBall
 from .events import (
@@ -35,6 +63,7 @@ from .engines import (
     FieldingEngine,
     OfficialScorer,
     PitchingEngine,
+    StrategyEngine,
 )
 from .at_bat import AtBat
 from .team import Team
@@ -42,22 +71,29 @@ from .game import Engines, Game, GameResult, HalfInning
 
 __all__ = [
     # Layer 0 - configuration
-    "SimulationConfig", "ParkConfig", "DEFAULT_CONFIG", "DEFAULT_PARK",
+    "SimulationConfig", "ParkConfig", "RosterConfig",
+    "DEFAULT_CONFIG", "DEFAULT_PARK",
     # Enums
-    "AtBatResult", "FieldingOutcome", "PitchCall", "PitchType", "Position",
-    "SwingOutcome",
+    "Approach", "AtBatResult", "DecisionBoundary", "DecisionKind",
+    "DefensiveAlignment", "FieldingOutcome", "OutfieldDepth", "PitchCall",
+    "PitchType", "Position", "SwingOutcome",
     # Layer 1 - persistent domain objects
     "Player", "PlayerStats", "HittingProfile", "PitchingProfile",
     "FieldingProfile", "RunningProfile", "PitchArsenalEntry",
     # Layer 2 - per-game state
-    "PlayerGameState", "Lineup", "BaseRunners", "ForceState", "Situation",
-    "Team",
+    "PlayerGameState", "Lineup", "GameRoster", "BullpenSlot", "BaseRunners",
+    "ForceState", "Situation", "Team",
     # Layer 3 - value objects
     "Pitch", "BattedBall", "FieldingResult", "Advancement", "Play",
     "PlateAppearanceOutcome", "BaserunningResult", "ScoringDecision",
+    # Layer 3 - decisions
+    "Decision", "DecisionContext", "DecisionLog", "DecisionRecord", "Option",
+    "BullpenView",
     # Layer 4 - engines
     "PitchingEngine", "BattingEngine", "FieldingEngine", "BaserunningEngine",
-    "OfficialScorer", "Engines",
+    "OfficialScorer", "StrategyEngine", "Engines",
+    # Layer 5 - agents
+    "ManagerAgent", "AIManager", "ScriptedManager", "RandomManager",
     # Layer 5 - orchestration
     "AtBat", "HalfInning", "Game", "GameResult",
 ]

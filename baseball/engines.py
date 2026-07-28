@@ -20,13 +20,17 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from .batted_ball import BattedBall
 from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
+from .decisions import Decision, DecisionContext, Option
 from .enums import (
     INFIELD_DEPTH_FT,
     MPH_TO_FPS,
     OUTFIELD_DEPTH_FT,
     ZONE_BOTTOM_FT,
     ZONE_TOP_FT,
+    Approach,
     AtBatResult,
+    DecisionBoundary,
+    DecisionKind,
     FieldingOutcome,
     PitchCall,
     Position,
@@ -247,10 +251,28 @@ class BattingEngine:
         )
         return max(cfg.foul_min, min(cfg.foul_max, base))
 
-    def decide_swing(
-        self, batter: Player, pitch: Pitch, situation: Situation, rng: random.Random
-    ) -> bool:
-        return rng.random() < self.swing_probability(batter, pitch, situation)
+    def decide_approach(
+        self,
+        batter: Player,
+        pitch: Pitch,
+        situation: Situation,
+        rng: random.Random,
+        bunt_sign: bool = False,
+    ) -> Approach:
+        """TAKE, SWING, or BUNT.
+
+        Replaces v0.3's boolean swing decision. A bunt bypasses the contact
+        model entirely -- bat speed is irrelevant to it -- so it cannot be
+        expressed as "swung, but differently".
+
+        The bunt sign comes from the manager, not from this engine, which is
+        why it arrives as an argument rather than being rolled for here.
+        """
+        if bunt_sign:
+            return Approach.BUNT
+        if rng.random() < self.swing_probability(batter, pitch, situation):
+            return Approach.SWING
+        return Approach.TAKE
 
     def resolve_swing(
         self, batter: Player, pitch: Pitch, rng: random.Random
@@ -845,3 +867,63 @@ class OfficialScorer:
                 defending_team.stats_for(fielding.fielder).putouts += 1
             elif fielding.outcome is FieldingOutcome.FIELDED_CLEANLY and result.is_out:
                 defending_team.stats_for(fielding.fielder).assists += 1
+
+
+class StrategyEngine:
+    """Produces the decisions a manager is asked to make, and applies them.
+
+    Stateless like the rest: config at construction, an immutable Situation
+    per call, value objects out. It knows what is *legal* and what the
+    options are; which one to pick is the agent's job.
+
+    Phase 1 is the contract only -- it offers no decisions yet, so behavior
+    is unchanged. Phase 5 fills it in one mechanic at a time.
+    """
+
+    def __init__(self, config: SimulationConfig = DEFAULT_CONFIG) -> None:
+        self.config = config
+
+    def leverage(self, situation: Situation) -> float:
+        """How much the next decision matters, roughly 0.0 to 1.0.
+
+        Used by AI heuristics in v0.4. v0.5 reuses it to decide which
+        prompts are worth surfacing to a human, which is what keeps ~290
+        pitches a game from becoming ~290 prompts.
+
+        Three things drive it: how close the score is, how late it is, and
+        how many runners are at stake.
+        """
+        margin = abs(situation.score_differential)
+        # A four-run game is nearly decided for tactical purposes.
+        closeness = max(0.0, 1.0 - margin / 4.0)
+        lateness = min(1.0, situation.inning / 9.0)
+        runners = situation.base_runners.count / 3.0
+        # Outs matter, but less than the rest.
+        urgency = situation.outs / 3.0 * 0.25
+
+        return round(
+            min(1.0, closeness * (0.35 + 0.45 * lateness) + 0.3 * runners + urgency),
+            3,
+        )
+
+    def pending_decisions(
+        self,
+        boundary: DecisionBoundary,
+        situation: Situation,
+        team: "Team",
+        context: Optional[DecisionContext] = None,
+    ) -> List[Decision]:
+        """Every decision legally available at this boundary.
+
+        Empty in Phase 1. Each Phase 5 slice adds one kind here alongside
+        the mechanic it drives, so a decision never exists without something
+        that acts on it.
+        """
+        return []
+
+    def apply(self, decision: Decision, choice: Option, game_state) -> None:
+        """Carry out a chosen option.
+
+        No-op in Phase 1; nothing produces decisions yet.
+        """
+        return None

@@ -8,7 +8,7 @@ without interference. Anything that changes during a game lives here.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 from .config import DEFAULT_CONFIG, SimulationConfig
 from .player import Player
@@ -21,16 +21,72 @@ class PlayerGameState:
     In v0.1 `pitches_thrown` lived on Player, so it drifted across at-bats
     and across games: a pitcher reused in a second simulation started
     already exhausted and walked everyone.
+
+    **Two pitch counters, deliberately.** `game_pitches_thrown` drives the
+    box score and counts only pitches thrown in the game.  `fatigue_load`
+    drives the model and also absorbs bullpen warm-up throws at a discount.
+    Merging them would report a reliever throwing 46 pitches when he threw
+    16.
     """
 
     player: Player
-    pitches_thrown: int = 0
+    game_pitches_thrown: int = 0
+    fatigue_load: float = 0.0
+    # Clamped to 0..pitches_to_warm. COLD / WARMING / READY are derived from
+    # this counter rather than stored, which is what makes a reliever pulled
+    # from the slot at 22 and returned later resume at 19 with no re-entry
+    # rule.
+    warmth: int = 0
+    # Warmth at the moment he entered the game. The cold-entry penalty locks
+    # in here and holds through the end of the half-inning he entered.
+    entry_warmth: int = 0
 
     def record_pitch(self) -> None:
-        self.pitches_thrown += 1
+        """A pitch thrown in the game: counts for both the box and the arm."""
+        self.game_pitches_thrown += 1
+        self.fatigue_load += 1.0
 
-    def reset(self) -> None:
-        self.pitches_thrown = 0
+    def record_warmup_pitch(self, config: SimulationConfig = DEFAULT_CONFIG) -> None:
+        """A pitch thrown in the bullpen: costs the arm, not the box score."""
+        self.warmth = min(config.pitches_to_warm, self.warmth + 1)
+        self.fatigue_load += config.warmup_fatigue_ratio
+
+    def cool(self, config: SimulationConfig = DEFAULT_CONFIG) -> None:
+        """Sitting down. Warmth bleeds off; no fatigue accrues."""
+        self.warmth = max(0, self.warmth - 1)
+
+    def reset(self, config: SimulationConfig = DEFAULT_CONFIG) -> None:
+        self.game_pitches_thrown = 0
+        self.fatigue_load = 0.0
+        self.warmth = 0
+        self.entry_warmth = 0
+
+    def start_warm(self, config: SimulationConfig = DEFAULT_CONFIG) -> None:
+        """The starting pitcher takes the mound ready, never using the slot."""
+        self.warmth = config.pitches_to_warm
+        self.entry_warmth = config.pitches_to_warm
+
+    def is_ready(self, config: SimulationConfig = DEFAULT_CONFIG) -> bool:
+        return self.warmth >= config.pitches_to_warm
+
+    def warmth_label(self, config: SimulationConfig = DEFAULT_CONFIG) -> str:
+        """Display only. The counter is the truth."""
+        if self.warmth <= 0:
+            return "COLD"
+        if self.warmth >= config.pitches_to_warm:
+            return "READY"
+        return "WARMING"
+
+    def cold_penalty_scale(self, config: SimulationConfig = DEFAULT_CONFIG) -> float:
+        """0.0 for a fully warm entry, 1.0 for stone cold.
+
+        Continuous rather than stepped, so there is no cliff between a
+        reliever at 29 warmth and one at 30.
+        """
+        if config.pitches_to_warm <= 0:
+            return 0.0
+        unready = config.pitches_to_warm - self.entry_warmth
+        return max(0.0, min(1.0, unready / config.pitches_to_warm))
 
     def fatigue(self, config: SimulationConfig = DEFAULT_CONFIG) -> float:
         """0.0 when fresh, rising once past the stamina limit.
@@ -41,7 +97,7 @@ class PlayerGameState:
         stamina = self.player.pitching.stamina
         if not stamina:
             return 0.0
-        over = self.pitches_thrown - stamina
+        over = self.fatigue_load - stamina
         return max(0.0, min(config.fatigue_cap, over / config.fatigue_pitches_scale))
 
 
@@ -84,6 +140,85 @@ class Lineup:
             raise ValueError(f"lineup has {len(self.batting_order)} players, need 9")
         if len({id(p) for p in self.batting_order}) != 9:
             raise ValueError("the same player appears twice in the lineup")
+
+
+@dataclass
+class GameRoster:
+    """Who is still available. Lineup handles order; this handles supply."""
+
+    bench: List[Player] = field(default_factory=list)
+    bullpen: List[Player] = field(default_factory=list)
+    # A substituted player cannot re-enter. This is the rule that makes
+    # bench depth a real constraint rather than a formality.
+    used_players: Set[Player] = field(default_factory=set)
+
+    def available_position_players(self) -> List[Player]:
+        return [p for p in self.bench if p not in self.used_players]
+
+    def available_pitchers(self) -> List[Player]:
+        return [p for p in self.bullpen if p not in self.used_players]
+
+    def mark_used(self, player: Player) -> None:
+        self.used_players.add(player)
+
+    def is_available(self, player: Player) -> bool:
+        return player not in self.used_players
+
+
+@dataclass
+class BullpenSlot:
+    """The bullpen mound. One pitcher at a time by default.
+
+    Occupancy can change on any pitch. The slot frees the instant a
+    reliever enters the game, so using your hot arm means starting the next
+    one from zero -- which is what makes pitching changes self-limiting
+    without a separate constraint.
+    """
+
+    capacity: int = 1
+    occupants: List[Player] = field(default_factory=list)
+
+    def is_occupied_by(self, player: Player) -> bool:
+        return player in self.occupants
+
+    def has_room(self) -> bool:
+        return len(self.occupants) < self.capacity
+
+    def assign(self, player: Player) -> None:
+        if player in self.occupants:
+            return
+        if not self.has_room():
+            raise ValueError(
+                f"bullpen slot is full ({self.capacity}); vacate before assigning"
+            )
+        self.occupants.append(player)
+
+    def vacate(self, player: Player) -> None:
+        if player in self.occupants:
+            self.occupants.remove(player)
+
+    def clear(self) -> None:
+        self.occupants.clear()
+
+    def tick(
+        self,
+        states: Dict[Player, "PlayerGameState"],
+        config: SimulationConfig = DEFAULT_CONFIG,
+        active_pitcher: Optional[Player] = None,
+    ) -> None:
+        """One game pitch of the single clock that drives warming and cooling.
+
+        Occupants gain warmth and fatigue load; everyone else cools. The
+        pitcher currently on the mound is exempt -- he is neither warming
+        nor going cold.
+        """
+        for player, state in states.items():
+            if player is active_pitcher:
+                continue
+            if self.is_occupied_by(player):
+                state.record_warmup_pitch(config)
+            else:
+                state.cool(config)
 
 
 @dataclass(frozen=True)

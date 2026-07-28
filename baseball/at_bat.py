@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 from .batted_ball import BattedBall
 from .config import DEFAULT_CONFIG, SimulationConfig
 from .engines import BattingEngine, PitchingEngine
-from .enums import PitchCall, SwingOutcome
+from .enums import Approach, PitchCall, SwingOutcome
 from .events import PlateAppearanceOutcome
 from .pitch import Pitch
 from .state import PlayerGameState, Situation
@@ -42,6 +42,8 @@ class AtBat:
     config: SimulationConfig = DEFAULT_CONFIG
     pitching_engine: Optional[PitchingEngine] = None
     batting_engine: Optional[BattingEngine] = None
+    # Set by the manager via StrategyEngine, never rolled for here.
+    bunt_sign: bool = False
 
     balls: int = 0
     strikes: int = 0
@@ -90,12 +92,20 @@ class AtBat:
             if self.rng.random() < self.config.hbp_rate:
                 return PitchCall.HIT_BY_PITCH, pitch
 
-        if not self.batting_engine.decide_swing(self.batter, pitch, situation, self.rng):
+        approach = self.batting_engine.decide_approach(
+            self.batter, pitch, situation, self.rng, bunt_sign=self.bunt_sign
+        )
+
+        if approach is Approach.TAKE:
             if pitch.in_zone:
                 self.strikes += 1
                 return PitchCall.CALLED_STRIKE, pitch
             self.balls += 1
             return PitchCall.BALL, pitch
+
+        if approach is Approach.BUNT:
+            # Bunt mechanics land in Phase 5.2. Nothing sets the sign yet.
+            raise NotImplementedError("bunts arrive in v0.4 Phase 5.2")
 
         outcome = self.batting_engine.resolve_swing(self.batter, pitch, self.rng)
 

@@ -55,6 +55,68 @@ class SwingOutcome(Enum):
     CONTACT = auto()
 
 
+class Approach(Enum):
+    """What the batter intends to do with this pitch.
+
+    Replaces the v0.3 boolean swing decision, which had no way to express a
+    bunt -- bunting bypasses the contact model entirely.
+    """
+
+    TAKE = auto()
+    SWING = auto()
+    BUNT = auto()
+
+
+class DefensiveAlignment(Enum):
+    """Infield positioning. Changeable between pitches, free."""
+
+    NORMAL = auto()
+    INFIELD_IN = auto()
+    DOUBLE_PLAY_DEPTH = auto()
+    CORNERS_IN = auto()
+
+
+class OutfieldDepth(Enum):
+    """Outfield positioning. Changeable at the plate-appearance boundary."""
+
+    NORMAL = auto()
+    SHALLOW = auto()
+    NO_DOUBLES = auto()
+
+
+class DecisionKind(Enum):
+    """Every choice a manager can be asked to make."""
+
+    STEAL = auto()
+    BUNT = auto()
+    HIT_AND_RUN = auto()
+    PINCH_HIT = auto()
+    PINCH_RUN = auto()
+    PITCHING_CHANGE = auto()
+    BULLPEN_SLOT = auto()
+    INTENTIONAL_WALK = auto()
+    INFIELD_ALIGNMENT = auto()
+    OUTFIELD_DEPTH = auto()
+    MOUND_VISIT = auto()
+    PITCHOUT = auto()
+    PICKOFF = auto()
+
+
+class DecisionBoundary(Enum):
+    """Where in the flow a decision is offered.
+
+    In v0.4 every boundary resolves through an agent without stopping.
+    These are the points v0.5's real-time mode will pause on.
+    """
+
+    PRE_GAME = auto()
+    PRE_HALF_INNING = auto()
+    PRE_PLATE_APPEARANCE = auto()
+    BETWEEN_PITCHES = auto()
+    MID_PLAY = auto()
+    POST_PLAY = auto()
+
+
 class FieldingOutcome(Enum):
     """What the defense physically did.
 

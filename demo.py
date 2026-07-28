@@ -183,7 +183,7 @@ def box_score(result):
         print(
             f"\n  {pitcher.name}: {ps.innings_pitched:.1f} IP, {ps.hits_allowed} H, "
             f"{ps.earned_runs} ER, {ps.walks_allowed} BB, {ps.strikeouts_pitched} K, "
-            f"{team.state_for(pitcher).pitches_thrown} pitches"
+            f"{team.state_for(pitcher).game_pitches_thrown} pitches"
         )
 
 

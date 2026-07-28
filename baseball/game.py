@@ -10,14 +10,17 @@ import random
 from dataclasses import dataclass, field, replace
 from typing import List, Optional
 
+from .agents import AIManager, ManagerAgent
 from .at_bat import AtBat
 from .config import DEFAULT_CONFIG, DEFAULT_PARK, ParkConfig, SimulationConfig
+from .decisions import DecisionLog
 from .engines import (
     BaserunningEngine,
     BattingEngine,
     FieldingEngine,
     OfficialScorer,
     PitchingEngine,
+    StrategyEngine,
 )
 from .enums import PitchCall
 from .events import BaserunningResult, Play
@@ -36,6 +39,7 @@ class Engines:
     fielding: FieldingEngine
     baserunning: BaserunningEngine
     scorer: OfficialScorer
+    strategy: StrategyEngine
 
     @classmethod
     def build(
@@ -49,6 +53,7 @@ class Engines:
             fielding=FieldingEngine(config, park),
             baserunning=BaserunningEngine(config),
             scorer=OfficialScorer(config),
+            strategy=StrategyEngine(config),
         )
 
 
@@ -227,6 +232,8 @@ class HalfInning:
             official_result=decision.result,
             outs_recorded=baserunning.outs_recorded,
             runs_scored=baserunning.runs_scored,
+            # Every run is earned until Phase 3 distinguishes them.
+            earned_runs=baserunning.runs_scored,
             advancements=baserunning.advancements,
             rbi_credited=baserunning.runs_scored,
         )
@@ -294,6 +301,11 @@ class Game:
     park: ParkConfig = DEFAULT_PARK
     seed: Optional[int] = None
     regulation_innings: int = 9
+    # One agent per side. Both are AIManagers in v0.4; v0.5 swaps one for a
+    # HumanManager without touching anything else.
+    home_manager: Optional[ManagerAgent] = None
+    away_manager: Optional[ManagerAgent] = None
+    decision_log: DecisionLog = field(default_factory=DecisionLog)
 
     home_score: int = 0
     away_score: int = 0
@@ -303,6 +315,15 @@ class Game:
     def __post_init__(self) -> None:
         if self.engines is None:
             self.engines = Engines.build(self.config, self.park)
+        if self.home_manager is None:
+            self.home_manager = AIManager()
+        if self.away_manager is None:
+            self.away_manager = AIManager()
+
+    def manager_for(self, team: Team) -> ManagerAgent:
+        agent = self.home_manager if team is self.home_team else self.away_manager
+        assert agent is not None
+        return agent
 
     @property
     def inning(self) -> int:
@@ -321,15 +342,22 @@ class Game:
         config: SimulationConfig = DEFAULT_CONFIG,
         park: ParkConfig = DEFAULT_PARK,
         seed: Optional[int] = None,
+        home_manager: Optional[ManagerAgent] = None,
+        away_manager: Optional[ManagerAgent] = None,
     ) -> "Game":
         home.validate()
         away.validate()
         # Everybody starts the game fresh.
         for team in (home, away):
             for player in list(team.fielding_positions) + team.bullpen:
-                team.state_for(player).reset()
+                team.state_for(player).reset(config)
+            team.bullpen_slot.capacity = config.bullpen_slots
+            team.bullpen_slot.clear()
+            team.mound_visits_remaining = config.mound_visits_per_game
             if team.starting_pitcher is not None:
                 team.current_pitcher = team.starting_pitcher
+                # The starter takes the mound ready and never uses the slot.
+                team.state_for(team.starting_pitcher).start_warm(config)
         rng = rng or random.Random()
         # One draw off the caller's generator becomes the game seed, so
         # passing the same generator still reproduces the same game.

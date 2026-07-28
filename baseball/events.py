@@ -44,6 +44,12 @@ class FieldingResult:
     landing_zone: str = ""
     distance_traveled: float = 0.0
     time_available: float = 0.0
+    # Was a force play available to the fielder? Set in Phase 2; this is
+    # what separates a fielder's choice from a single, and what makes a
+    # double play possible at all.
+    force_available: bool = False
+    lead_runner_retired: bool = False
+    throw_error: bool = False
     # The fence distance at this ball's spray angle. Carried here because
     # the engine already computed it and BaserunningEngine needs it to tell
     # an off-the-wall double from a routine one.
@@ -100,9 +106,20 @@ class Play:
     # An int, not a bool. This is what makes double plays representable.
     outs_recorded: int = 0
     runs_scored: int = 0
+    # Runs the pitcher is charged with. Every run charged the pitcher in
+    # v0.3, which left ERA systematically high; Phase 3 makes this differ
+    # from runs_scored.
+    earned_runs: int = 0
     advancements: List[Advancement] = field(default_factory=list)
     rbi_credited: int = 0
     description: str = ""
+
+    # Scoring classifications, set by OfficialScorer.
+    is_sacrifice_fly: bool = False
+    is_sacrifice_hit: bool = False
+    is_double_play: bool = False
+    is_triple_play: bool = False
+    is_fielders_choice: bool = False
 
     @property
     def pitches(self) -> int:

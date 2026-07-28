@@ -116,7 +116,7 @@ def measure(n_games: int, seed: int) -> dict:
             total_pitchers_used += sum(
                 1
                 for player, state in team.game_states.items()
-                if state.pitches_thrown > 0
+                if state.game_pitches_thrown > 0
             )
             for stats in team.stats.values():
                 sac_flies += stats.sac_flies
