@@ -19,9 +19,17 @@ python3 demo.py inning        # one half-inning
 python3 demo.py scout         # 20-80 scouting reports for a team
 python3 demo.py series 200    # does talent actually win?
 
-python3 -m unittest test_baseball -v   # 75 tests
-python3 calibrate.py 500               # compare output to real MLB rates
+python3 -m unittest discover -s tests    # 75 tests
+python3 calibrate.py 500 --seeds 5       # compare output to real MLB rates
 ```
+
+All commands run from the repository root.
+
+**Never read calibration off a single seed.** Run scoring has a seed-to-seed
+standard deviation around 0.09 at 500 games — wider than most gaps worth
+closing — so one seed will report success for a change that did nothing.
+`--seeds 5` reports mean and standard deviation, and a metric counts as in
+range when that interval overlaps the benchmark band.
 
 Every command takes an optional seed to reproduce a run exactly:
 
@@ -32,22 +40,24 @@ python3 demo.py game 2024
 ## Layout
 
 ```
-baseball/
-  config.py       SimulationConfig + ParkConfig: every tuned constant
-  enums.py        Position, PitchType, AtBatResult, FieldingOutcome, geometry
-  player.py       Player, the four scouting profiles, PlayerStats
-  state.py        PlayerGameState, Lineup, BaseRunners, Situation
-  pitch.py        One pitched ball (immutable record)
-  batted_ball.py  Contact physics only
-  events.py       FieldingResult, Advancement, Play — the event record
-  engines.py      The five decision engines
-  rngs.py         Per-plate-appearance random streams
-  at_bat.py       The plate appearance loop
-  team.py         Team
-  game.py         HalfInning, Game, GameResult
-demo.py           CLI for exploring each layer
-calibrate.py      Tuning harness: simulate many games, compare to real MLB
-test_baseball.py  Test suite, organized bottom-up by layer
+baseball/           the engine, importable as a package
+  config.py         SimulationConfig + ParkConfig: every tuned constant
+  enums.py          Position, PitchType, AtBatResult, FieldingOutcome, geometry
+  player.py         Player, the four scouting profiles, PlayerStats
+  state.py          PlayerGameState, Lineup, BaseRunners, Situation
+  pitch.py          One pitched ball (immutable record)
+  batted_ball.py    Contact physics only
+  events.py         FieldingResult, Advancement, Play — the event record
+  engines.py        The five decision engines
+  rngs.py           Per-plate-appearance random streams
+  at_bat.py         The plate appearance loop
+  team.py           Team
+  game.py           HalfInning, Game, GameResult
+tests/
+  test_baseball.py  Test suite, organized bottom-up by layer
+demo.py             CLI for exploring each layer
+calibrate.py        Tuning harness: simulate many games, compare to real MLB
+docs/               Design documents and the version specifications
 ```
 
 ## How one plate appearance flows

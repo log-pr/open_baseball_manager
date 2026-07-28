@@ -1,7 +1,7 @@
 # Baseball Manager — Core Simulation Classes (v0.3)
 
 > **Status: implemented.** All seven migration steps are done; the code in
-> `src/baseball/` matches this document. Deviations that were made
+> `baseball/` matches this document. Deviations that were made
 > deliberately during implementation are recorded in "As-built notes" at the
 > end — read that section before treating any signature here as exact.
 

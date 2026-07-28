@@ -18,12 +18,9 @@ to tell whether new code produces a realistic rate.
 import argparse
 import random
 import statistics
-import sys
 from collections import Counter
 
-sys.path.insert(0, ".")
-
-from baseball import (  # noqa: E402
+from baseball import (
     AtBatResult,
     BattingEngine,
     Game,
